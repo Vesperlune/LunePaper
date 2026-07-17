@@ -74,11 +74,11 @@ function DecoBlobs() {
   return (
     <div className="absolute inset-0 overflow-hidden pointer-events-none select-none">
       <div className="absolute -top-24 -left-24 w-80 h-80 rounded-full opacity-[0.07] animate-float"
-           style={{ background: 'linear-gradient(135deg, #7c3aed, #3b82f6)' }} />
+           style={{ background: 'linear-gradient(135deg, #8b7fc7, #a89cc8)' }} />
       <div className="absolute top-1/3 -right-20 w-64 h-64 rounded-full opacity-[0.05] animate-float-d1"
-           style={{ background: 'linear-gradient(135deg, #3b82f6, #0891b2)' }} />
+           style={{ background: 'linear-gradient(135deg, #9b8ec4, #c4b8e0)' }} />
       <div className="absolute -bottom-16 left-1/3 w-72 h-72 rounded-full opacity-[0.04] animate-float-d2"
-           style={{ background: 'linear-gradient(135deg, #0891b2, #7c3aed)' }} />
+           style={{ background: 'linear-gradient(135deg, #a89cc8, #8b7fc7)' }} />
     </div>
   );
 }
@@ -200,7 +200,7 @@ export default function App() {
     const el = mainRef.current;
     const observer = new IntersectionObserver(
       entries => { for (const e of entries) { if (e.isIntersecting) { const p = Number(e.target.getAttribute('data-page')); if (p) setActivePage(p); } } },
-      { root: null, threshold: 0.15, rootMargin: '-80px 0px -60% 0px' }
+      { root: null, threshold: 0.15, rootMargin: '-16px 0px -60% 0px' }
     );
     el.querySelectorAll('[data-page]').forEach(n => observer.observe(n));
     return () => observer.disconnect();
@@ -229,10 +229,10 @@ export default function App() {
     <div className="min-h-screen">
       {/* ── Header ── */}
       <header className="sticky top-0 z-50 border-b border-white/30 bg-white/40 backdrop-blur-[50px] saturate-[1.8] shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]">
-        <div className="max-w-[95rem] mx-auto px-6 h-20 flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            <img src="/logo.jpg" alt="logo" className="w-20 h-20 rounded-full object-cover border-2 border-white/60 shadow-sm" />
-            <span className="font-semibold text-gray-900 tracking-tight">Paper Translator</span>
+        <div className="max-w-[95rem] mx-auto px-6 py-1 flex items-end justify-between">
+          <div className="flex items-end gap-2.5">
+            <img src="/logo.jpg" alt="logo" className="w-20 h-20 rounded-full object-cover border-2 border-white/60 shadow-sm -mb-8" />
+            <span className="font-semibold text-gray-900 tracking-tight mb-1">LunePaper</span>
           </div>
 
           <div className="flex items-center gap-3">
@@ -256,7 +256,7 @@ export default function App() {
                 title={locked ? '已保护 · 刷新将提示确认' : '未保护 · 刷新将丢失内容'}
                 className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all
                   ${locked
-                    ? 'bg-blue-50 text-blue-600 hover:bg-blue-100'
+                    ? 'bg-violet-50 text-violet-600 hover:bg-violet-100'
                     : 'bg-gray-100 text-gray-400 hover:bg-gray-200 hover:text-gray-500'
                   }`}
               >
@@ -272,7 +272,7 @@ export default function App() {
                 title={compareMode ? '关闭 PDF 对照' : '开启 PDF 对照'}
                 className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all
                   ${compareMode
-                    ? 'bg-blue-50 text-blue-600 hover:bg-blue-100'
+                    ? 'bg-violet-50 text-violet-600 hover:bg-violet-100'
                     : 'bg-gray-100 text-gray-400 hover:bg-gray-200 hover:text-gray-500'
                   }`}
               >
@@ -301,14 +301,14 @@ export default function App() {
                   <div className="flex justify-between text-sm mb-2">
                     <span className="text-gray-500 flex items-center gap-2">
                       <span className="relative flex h-2.5 w-2.5">
-                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
-                        <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-amber-500" />
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-violet-400 opacity-75" />
+                        <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-violet-500" />
                       </span>
                       OCR 识别中...
                     </span>
                     <span className="text-gray-400 font-medium tabular-nums">
                       {ocrPage} / {totalPages} 页
-                      <span className="ml-2 text-amber-500 font-semibold">
+                      <span className="ml-2 text-violet-500 font-semibold">
                         {totalPages > 0 ? Math.round((ocrPage / totalPages) * 100) : 0}%
                       </span>
                     </span>
@@ -316,8 +316,8 @@ export default function App() {
                   <div className="h-2.5 bg-gray-100/60 rounded-full overflow-hidden relative">
                     <div className="h-full rounded-full transition-all duration-500 ease-out progress-stripe relative"
                          style={{ width: `${totalPages > 0 ? (ocrPage / totalPages) * 100 : 0}%`,
-                                  background: 'linear-gradient(90deg, #f59e0b, #eab308)' }}>
-                      <div className="absolute right-0 top-1/2 -translate-y-1/2 w-3 h-3 bg-white rounded-full shadow-md border-2 border-amber-400" />
+                                  background: 'linear-gradient(90deg, #8b7fc7, #a89cc8)' }}>
+                      <div className="absolute right-0 top-1/2 -translate-y-1/2 w-3 h-3 bg-white rounded-full shadow-md border-2 border-violet-400" />
                     </div>
                   </div>
                 </>
@@ -327,14 +327,14 @@ export default function App() {
                   <div className="flex justify-between text-sm mb-2">
                     <span className="text-gray-500 flex items-center gap-2">
                       <span className="relative flex h-2.5 w-2.5">
-                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-                        <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-blue-500" />
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-violet-400 opacity-75" />
+                        <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-violet-500" />
                       </span>
                       翻译中...
                     </span>
                     <span className="text-gray-400 font-medium tabular-nums">
                       {transDone} / {transTotal} 块
-                      <span className="ml-2 text-blue-500 font-semibold">
+                      <span className="ml-2 text-violet-500 font-semibold">
                         {transTotal > 0 ? Math.round((transDone / transTotal) * 100) : 0}%
                       </span>
                     </span>
@@ -342,8 +342,8 @@ export default function App() {
                   <div className="h-2.5 bg-gray-100/60 rounded-full overflow-hidden relative">
                     <div className="h-full rounded-full transition-all duration-500 ease-out progress-stripe relative"
                          style={{ width: `${transTotal > 0 ? (transDone / transTotal) * 100 : 0}%`,
-                                  background: 'linear-gradient(90deg, #3b82f6, #0891b2)' }}>
-                      <div className="absolute right-0 top-1/2 -translate-y-1/2 w-3 h-3 bg-white rounded-full shadow-md border-2 border-blue-400" />
+                                  background: 'linear-gradient(90deg, #8b7fc7, #a89cc8)' }}>
+                      <div className="absolute right-0 top-1/2 -translate-y-1/2 w-3 h-3 bg-white rounded-full shadow-md border-2 border-violet-400" />
                     </div>
                   </div>
                 </>
@@ -355,13 +355,13 @@ export default function App() {
           {mode === 'done' && (
             <div className="glass-card mb-6 flex items-center gap-4 animate-fade-in-up rounded-xl px-5 py-3">
               <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
-                <div className="h-full w-full rounded-full" style={{ background: 'linear-gradient(90deg, #7c3aed, #3b82f6, #0891b2)' }} />
+                <div className="h-full w-full rounded-full" style={{ background: 'linear-gradient(90deg, #8b7fc7, #a89cc8, #c4b8e0)' }} />
               </div>
               <span className="text-sm text-gray-400 whitespace-nowrap">{task?.quality?.total_blocks ?? blocks.length} 个内容块</span>
               <button onClick={() => window.open(getDownloadUrl(task!.task_id))}
                 className="inline-flex items-center gap-2 px-5 py-2 text-white rounded-lg text-sm font-medium
-                           transition-all hover:shadow-lg hover:shadow-blue-200 hover:-translate-y-0.5 active:translate-y-0"
-                style={{ background: 'linear-gradient(135deg, #7c3aed, #3b82f6)' }}>
+                           transition-all hover:shadow-lg hover:shadow-violet-200 hover:-translate-y-0.5 active:translate-y-0"
+                style={{ background: 'linear-gradient(135deg, #8b7fc7, #a89cc8)' }}>
                 <IconDownload /> 下载 ZIP
               </button>
               <button onClick={() => { if (locked) { if (!confirm('确定要开始新任务吗？当前翻译内容将丢失。')) return; } clear(); }}
@@ -383,7 +383,7 @@ export default function App() {
             {/* 左侧页缩略图导航 */}
             {showSidebar && (
               <div className="hidden lg:block w-36 shrink-0">
-                <div className="sticky top-20 max-h-[calc(100vh-7rem)] overflow-y-auto sidebar-scroll">
+                <div className="sticky top-2 max-h-[calc(100vh-4rem)] overflow-y-auto sidebar-scroll">
                   <PageSidebar
                     totalPages={totalPages || task?.page_count || 0}
                     activePage={activePage}
@@ -396,28 +396,30 @@ export default function App() {
             )}
 
             {/* 主内容区（翻译） */}
-            <div ref={mainRef} className={`min-w-0 ${compareMode ? 'w-1/2' : 'flex-1'}`}>
+            <div ref={mainRef} className={`min-w-0 ${compareMode ? 'w-3/5' : 'flex-1'}`}>
               <Preview blocks={blocks} taskId={task?.task_id ?? ''} phase={phase} />
             </div>
 
             {/* 右侧 PDF 对照面板 */}
             {compareMode && task && (
-              <div className="w-1/2 shrink-0">
-                <div className="sticky top-20 max-h-[calc(100vh-7rem)] overflow-y-auto sidebar-scroll rounded-xl border border-white/30 bg-white/50 backdrop-blur-[40px] saturate-[1.6] shadow-[0_2px_8px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.5)]">
-                  <div className="flex items-center justify-between px-3 py-2 border-b border-white/20">
-                    <span className="text-xs font-medium text-gray-400">原文 · 第 {activePage} 页</span>
-                    <div className="flex items-center gap-1">
-                      <button onClick={() => { if (activePage > 1) scrollToPage(activePage - 1); }}
-                        disabled={activePage <= 1}
-                        className="p-1 rounded hover:bg-white/50 disabled:opacity-30 transition-colors text-gray-500">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="15 18 9 12 15 6" /></svg>
-                      </button>
-                      <span className="text-[10px] text-gray-300 px-1">{activePage}/{totalPages || task.page_count}</span>
-                      <button onClick={() => { if (activePage < (totalPages || task.page_count)) scrollToPage(activePage + 1); }}
-                        disabled={activePage >= (totalPages || task.page_count)}
-                        className="p-1 rounded hover:bg-white/50 disabled:opacity-30 transition-colors text-gray-500">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="9 18 15 12 9 6" /></svg>
-                      </button>
+              <div className="w-2/5 shrink-0">
+                <div className="sticky top-2 max-h-[calc(100vh-4rem)] overflow-y-auto sidebar-scroll rounded-xl border border-white/30 bg-white/50 backdrop-blur-[40px] saturate-[1.6] shadow-[0_2px_8px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.5)]">
+                  <div className="sticky top-0 z-30 bg-white/90 border-b border-white/30 px-3 py-2 backdrop-blur-sm">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-medium text-gray-400">原文 · 第 {activePage} 页</span>
+                      <div className="flex items-center gap-1">
+                        <button onClick={() => { if (activePage > 1) scrollToPage(activePage - 1); }}
+                          disabled={activePage <= 1}
+                          className="p-1 rounded hover:bg-white/50 disabled:opacity-30 transition-colors text-gray-500">
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="15 18 9 12 15 6" /></svg>
+                        </button>
+                        <span className="text-[10px] text-gray-300 px-1">{activePage}/{totalPages || task.page_count}</span>
+                        <button onClick={() => { if (activePage < (totalPages || task.page_count)) scrollToPage(activePage + 1); }}
+                          disabled={activePage >= (totalPages || task.page_count)}
+                          className="p-1 rounded hover:bg-white/50 disabled:opacity-30 transition-colors text-gray-500">
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="9 18 15 12 9 6" /></svg>
+                        </button>
+                      </div>
                     </div>
                   </div>
                   <img
@@ -457,7 +459,7 @@ function PageSidebar({
             <button key={p} onClick={() => onGoToPage(p)}
               className={`group w-full rounded-lg overflow-hidden transition-all duration-200 text-left
                 bg-white/40 backdrop-blur-sm border border-white/30
-                ${isActive ? 'ring-2 ring-blue-400 shadow-md shadow-blue-100 bg-white/60' : 'hover:ring-blue-200 hover:shadow-sm hover:bg-white/50'}`}
+                ${isActive ? 'ring-2 ring-violet-400 shadow-md shadow-violet-100 bg-white/60' : 'hover:ring-violet-200 hover:shadow-sm hover:bg-white/50'}`}
             >
               <div className="relative bg-gray-50 aspect-[3/4] overflow-hidden">
                 {isReached ? (
@@ -466,10 +468,10 @@ function PageSidebar({
                 ) : (
                   <div className="w-full h-full flex items-center justify-center text-gray-300"><IconPage /></div>
                 )}
-                {isActive && <div className="absolute inset-0 bg-blue-500/10" />}
+                {isActive && <div className="absolute inset-0 bg-violet-500/10" />}
               </div>
               <div className={`text-center py-0.5 text-[11px] font-medium transition-colors
-                ${isActive ? 'text-blue-600 bg-blue-50' : 'text-gray-400 group-hover:text-gray-600'}`}>
+                ${isActive ? 'text-violet-600 bg-violet-50' : 'text-gray-400 group-hover:text-gray-600'}`}>
                 {p}
               </div>
             </button>
@@ -490,17 +492,18 @@ function UploadView({ onUpload, error }: { onUpload: (f: File) => void; error: s
       <DecoBlobs />
       <div className="relative z-10 max-w-xl w-full animate-fade-in-up">
         <div className="text-center mb-6">
-          <h1 className="text-3xl font-bold tracking-tight mb-1"><span className="text-gradient">Paper Translator</span></h1>
+          <h1 className="text-5xl font-extrabold tracking-tight mb-1 drop-shadow-[0_2px_8px_rgba(139,127,199,0.25)]"
+              style={{ fontFamily: '"Caveat", cursive' }}><span className="text-gradient">LunePaper</span></h1>
         </div>
         <div
           onDragOver={e => { e.preventDefault(); setDrag(true); }}
           onDragLeave={() => setDrag(false)}
           onDrop={e => { e.preventDefault(); setDrag(false); const f = e.dataTransfer.files[0]; if (f?.name.endsWith('.pdf')) onUpload(f); }}
           className={`upload-zone rounded-2xl p-10 text-center cursor-pointer transition-all
-            ${drag ? 'dragging border-blue-400 bg-blue-50/50' : 'border-gray-200 hover:border-blue-300 hover:bg-blue-50/30'}`}
+            ${drag ? 'dragging border-violet-400 bg-violet-50/50' : 'border-gray-200 hover:border-violet-300 hover:bg-violet-50/30'}`}
           onClick={() => document.getElementById('fileInput')?.click()}>
           <div className={`mx-auto w-16 h-16 rounded-2xl flex items-center justify-center mb-4 transition-all
-            ${drag ? 'bg-blue-100 text-blue-600 scale-110' : 'bg-gray-50 text-gray-300'}`}>
+            ${drag ? 'bg-violet-100 text-violet-600 scale-110' : 'bg-gray-50 text-gray-300'}`}>
             <IconUpload />
           </div>
           <p className="text-gray-600 text-base font-medium mb-1">{drag ? '松开以上传' : '拖拽 PDF 到此处'}</p>
@@ -519,9 +522,9 @@ function UploadView({ onUpload, error }: { onUpload: (f: File) => void; error: s
       <div className="fixed bottom-4 right-6 z-20 hidden md:block">
         <div className="relative">
           {/* Oval speech bubble */}
-          <div className="absolute -top-10 left-1/2 -translate-x-1/2 whitespace-nowrap bg-white/80 backdrop-blur-sm border border-blue-200/50 shadow-sm"
+          <div className="absolute -top-10 left-1/2 -translate-x-1/2 whitespace-nowrap bg-white/80 backdrop-blur-sm border border-violet-200/50 shadow-sm"
                style={{ borderRadius: '999px', padding: '6px 18px' }}>
-            <span className="text-sm font-medium" style={{ fontFamily: '"ZCOOL KuaiLe", cursive', color: '#7dd3fc' }}>
+            <span className="text-sm font-medium" style={{ fontFamily: '"ZCOOL KuaiLe", cursive', color: '#8b7fc7' }}>
               欢迎来到「月读」的世界^_^
             </span>
           </div>
@@ -550,7 +553,7 @@ function TableBlock({ html }: { html: string }) {
     <div className="text-xs [&_table]:w-full [&_table]:border-collapse
       [&_td]:border [&_td]:border-gray-200 [&_td]:px-2.5 [&_td]:py-1.5
       [&_th]:border [&_th]:border-gray-200 [&_th]:px-2.5 [&_th]:py-1.5
-      [&_th]:bg-gray-50 [&_td]:bg-white [&_tr:hover_td]:bg-blue-50/40 text-gray-600"
+      [&_th]:bg-gray-50 [&_td]:bg-white [&_tr:hover_td]:bg-violet-50/40 text-gray-600"
       dangerouslySetInnerHTML={{ __html: html }} />
   );
 }
@@ -582,11 +585,11 @@ function Preview({ blocks, taskId, phase }: { blocks: BlockData[]; taskId: strin
         return (
           <div key={`${b.page}-${b.idx}`} className="animate-slide-in" style={{ animationDelay: `${Math.min(animIdx * 0.03, 0.5)}s` }}>
             {pageBreak && (
-              <div data-page={b.page} className="flex items-center gap-3 mt-8 mb-4 scroll-mt-20">
+              <div data-page={b.page} className="flex items-center gap-3 mt-8 mb-4 scroll-mt-2">
                 <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/60 backdrop-blur-sm border border-white/40 shadow-sm">
-                  <IconPage /><span className="text-sm font-semibold text-blue-600">第 {b.page} 页</span>
+                  <IconPage /><span className="text-sm font-semibold text-violet-600">第 {b.page} 页</span>
                 </div>
-                <div className="flex-1 h-px bg-gradient-to-r from-blue-200/60 via-blue-100/30 to-transparent" />
+                <div className="flex-1 h-px bg-gradient-to-r from-violet-200/60 via-violet-100/30 to-transparent" />
               </div>
             )}
 
@@ -633,28 +636,28 @@ function Preview({ blocks, taskId, phase }: { blocks: BlockData[]; taskId: strin
               ${b.verified === false ? 'ring-1 ring-red-200 bg-red-50/30' : ''}`}>
 
               {b.type !== 'text' && (
-                <span className="inline-block text-[10px] font-semibold uppercase tracking-wider text-blue-500 bg-blue-50 px-2 py-0.5 rounded mb-2">
+                <span className="inline-block text-[10px] font-semibold uppercase tracking-wider text-violet-500 bg-violet-50 px-2 py-0.5 rounded mb-2">
                   {b.type}
                 </span>
               )}
 
               {b.zh === b.en ? (
                 /* Passthrough: 只显示一次，原文样式 */
-                <div className="text-sm text-gray-700 leading-relaxed break-words overflow-hidden">
+                <div className={`${b.type === 'title' ? 'text-lg font-semibold' : 'text-sm'} text-gray-700 leading-relaxed break-words overflow-hidden`}>
                   <MdBlock text={b.en} />
                 </div>
               ) : (
                 <>
                   {/* English */}
-                  <div className="text-sm text-gray-400 leading-relaxed pb-2 italic break-words overflow-hidden">
+                  <div className={`${b.type === 'title' ? 'text-lg font-semibold' : 'text-sm'} ${b.type === 'title' ? 'text-gray-600' : 'text-gray-400'} leading-relaxed pb-2 italic break-words overflow-hidden`}>
                     <MdBlock text={b.en} />
                   </div>
 
                   {/* Separator */}
-                  <div className="h-px bg-gradient-to-r from-blue-100 via-blue-50 to-transparent my-1" />
+                  <div className="h-px bg-gradient-to-r from-violet-100 via-violet-50 to-transparent my-1" />
 
                   {/* Chinese — CSS 揭示动画，保留 KaTeX 渲染 */}
-                  <div className="text-[15px] text-gray-800 leading-relaxed break-words overflow-hidden">
+                  <div className={`${b.type === 'title' ? 'text-lg font-semibold' : 'text-[15px]'} text-gray-800 leading-relaxed break-words overflow-hidden`}>
                     {b.zh ? (
                       <StreamReveal textLen={b.zh.length}><MdBlock text={b.zh} /></StreamReveal>
                     ) : (

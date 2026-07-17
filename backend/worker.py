@@ -88,6 +88,42 @@ def run_translation(task, dpi: int, cancel_event: threading.Event):
             blocks = parse_ocr_output(ocr_text)
             blocks = merge_split_blocks(blocks)
 
+            # 去重：仅删除相邻的重复 block（相同 type + text），保留非相邻的合法重复
+            deduped = [blocks[0]] if blocks else []
+            for b in blocks[1:]:
+                prev = deduped[-1]
+                if (b['type'] == prev['type'] and
+                        b['text'].strip() == prev['text'].strip()):
+                    continue  # 相邻重复，跳过
+                deduped.append(b)
+            blocks = deduped
+
+            # 过滤无效内容标记（含重复 [Non-Text] 模式）
+            def _is_invalid_block(b):
+                text = b['text'].strip()
+                low = text.lower()
+                # 精确匹配单个标记
+                if low in {'[non-text]', '[non text]', '[none]', '[blank]'}:
+                    return True
+                # [Non-Text] 占比超过 50%（捕获重复模式）
+                nontext_count = low.count('[non-text]') + low.count('[non text]')
+                if nontext_count > 0:
+                    marker_chars = nontext_count * 10  # len("[non-text] ") ≈ 10
+                    if marker_chars / max(len(low), 1) > 0.5:
+                        return True
+                return False
+            blocks = [b for b in blocks if not _is_invalid_block(b)]
+
+            # 过滤短 fragment block（文本是前一个 block 的子串，防止 OCR 碎片重复）
+            filtered = []
+            for b in blocks:
+                text = b['text'].strip()
+                if (filtered and b['type'] == 'text' and
+                        len(text) < 80 and text in filtered[-1]['text']):
+                    continue  # 短 fragment 是前一个 block 的子串，跳过
+                filtered.append(b)
+            blocks = filtered
+
             # 分类 + 裁剪
             page_blocks = []
             for i, b in enumerate(blocks):
