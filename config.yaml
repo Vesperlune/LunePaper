@@ -1,0 +1,54 @@
+# Paper Translator — 统一配置文件
+
+# ── 模型路径 ──
+models:
+  ocr: "Unlimited-OCR-Q8_0.gguf"
+  mmproj: "mmproj-Unlimited-OCR-F16.gguf"
+  translation: "Hy-MT2-1.8B-Q8_0.gguf"
+
+# ── GPU 设置 ──
+gpu:
+  ocr_layers: 99        # OCR 模型 GPU 层数 (-1 = 全部)
+  trans_layers: 99       # 翻译模型 GPU 层数
+
+# ── OCR 参数 ──
+ocr:
+  max_tokens: 4096       # 每页最大输出 token 数
+  n_ctx: 4096            # 上下文窗口
+  dpi: 144               # PDF 渲染 DPI
+
+# ── 翻译参数 ──
+translation:
+  max_tokens: 1024       # 单块最大输出 token
+  chunk_size: 500        # 长文分段阈值（字符数）
+  n_ctx: 2048            # 上下文窗口
+  n_threads: 4           # CPU 线程数
+  verify: true           # 是否启用回译验证
+  verify_strategy: "adaptive"  # adaptive: 保守快速放行 + 回译兜底；full: 全量回译
+  verify_audit_rate: 0.10       # 快速放行段落中仍执行完整回译的固定抽检比例
+  max_retries: 2         # 最大重译次数
+
+# ── 采样参数 ──
+sampling:
+  temperature: 0.3       # 默认温度
+  retry_temperature: 0.05 # 重译温度
+  top_p: 0.6
+  top_k: 20
+
+# ── 伪标题检测 ──
+pseudo_title:
+  max_len: 40            # 短于该长度判定为标题
+  heading_max_len: 100   # 编号标题最大长度
+
+# ── 回译验证阈值 ──
+verify:
+  threshold_short: 0.50  # < 100 字
+  threshold_medium: 0.45 # 100-300 字
+  threshold_long: 0.40   # 300-600 字
+  threshold_xlong: 0.35  # > 600 字
+
+# ── 服务配置 ──
+server:
+  host: "0.0.0.0"
+  port: 7860
+  cors_origin: "http://localhost:5173"
