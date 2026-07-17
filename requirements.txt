@@ -1,0 +1,24 @@
+# ═════════════════════════════════════════
+#  Paper Translator — Python Dependencies
+# ═══════════════════════════════════════════
+
+# ── Web 框架 ──
+fastapi>=0.110.0
+uvicorn[standard]>=0.30.0
+
+# ── HTTP & 文件 ──
+aiofiles>=23.0
+python-multipart>=0.0.9
+
+# ── 配置 ──
+PyYAML>=6.0
+
+# ── PDF & 图像处理 ──
+PyMuPDF>=1.24.0
+Pillow>=10.0
+
+# ── 数据模型 ──
+pydantic>=2.0
+
+# ── 实验性工作流（可选） ──
+langgraph>=0.2.0
