@@ -22,7 +22,7 @@
 <div align="center">
 <img src="assets/showcase.png" width="90%" style="border-radius:12px;box-shadow:0 8px 40px rgba(0,0,0,0.12);" />
 <br><br>
-<em>月读界面一览 — iOS 26 风格毛玻璃 UI + 流式翻译 + PDF 对照</em>
+<em>LunePaper界面一览</em>
 </div>
 
 <br>
@@ -284,12 +284,7 @@ LunePaper/
 ├── config.yaml               # 统一配置文件
 ├── config.py                 # 配置加载器
 ├── requirements.txt          # Python 依赖
-├── NOTICE.md                 # 第三方开源 Attribution
-│
-├── DESIGN_DOC.md             # 原始总体设计文档
-├── PHASE3_DESIGN.md          # LangGraph 工作流设计
-├── PHASE4_DESIGN.md          # Web 前端设计
-└── PHASE5_TRANSLATION_DESIGN.md  # 翻译策略设计
+└── NOTICE.md                 # 第三方开源 Attribution
 ```
 
 <br>
