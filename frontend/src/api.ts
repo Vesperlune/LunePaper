@@ -34,3 +34,30 @@ export function getImageUrl(taskId: string, figureName: string) {
 export function createWs(taskId: string): WebSocket {
   return new WebSocket(`ws://localhost:7860/ws/${taskId}`);
 }
+
+export interface HistoryItem {
+  task_id: string;
+  filename: string;
+  page_count: number;
+  created_at: number;
+  quality: { total_blocks?: number; pass_rate?: string };
+  status: string;
+}
+
+export async function listHistory(): Promise<HistoryItem[]> {
+  const res = await fetch(`${BASE}/api/history`);
+  if (!res.ok) return [];
+  return res.json();
+}
+
+export async function loadHistoryTask(taskId: string) {
+  const res = await fetch(`${BASE}/api/history/${taskId}/load`, { method: 'POST' });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function deleteHistoryTask(taskId: string) {
+  const res = await fetch(`${BASE}/api/history/${taskId}`, { method: 'DELETE' });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}

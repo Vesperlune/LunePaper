@@ -287,6 +287,7 @@ def run_translation(task, dpi: int, cancel_event: threading.Event):
         translator.close()
         _emit(task_id, {"type": "complete"})
         task_manager.update(task_id, status="completed")
+        task_manager.save_task(task_id)
 
     except InterruptedError:
         task_manager.update(task_id, status="failed", error="Cancelled")

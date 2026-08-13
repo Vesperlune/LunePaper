@@ -3,7 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
-import { uploadPdf, startTranslation, getDownloadUrl } from './api';
+import { uploadPdf, startTranslation, getDownloadUrl, listHistory, loadHistoryTask, deleteHistoryTask, type HistoryItem } from './api';
 import { useWebSocket } from './hooks/useWebSocket';
 
 type AppMode = 'upload' | 'translating' | 'done';
@@ -119,8 +119,38 @@ export default function App() {
   const [ocrPage, setOcrPage] = useState(0);
   const [transDone, setTransDone] = useState(0);
   const [transTotal, setTransTotal] = useState(0);
+  const [history, setHistory] = useState<HistoryItem[]>([]);
   const blocksRef = useRef<BlockData[]>([]);
   const mainRef = useRef<HTMLDivElement>(null);
+
+  /* ── 加载历史记录 ── */
+  useEffect(() => {
+    listHistory().then(setHistory).catch(() => {});
+  }, []);
+
+  const loadHistory = async (taskId: string) => {
+    setError('');
+    try {
+      const data = await loadHistoryTask(taskId);
+      setTask(data);
+      setTotalPages(data.page_count);
+      setBlocks(data.blocks || []);
+      blocksRef.current = data.blocks || [];
+      setMode('done');
+      setLocked(true);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to load history');
+    }
+  };
+
+  const removeHistory = async (taskId: string) => {
+    try {
+      await deleteHistoryTask(taskId);
+      setHistory(prev => prev.filter(h => h.task_id !== taskId));
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to delete');
+    }
+  };
 
   /* ── 防刷新保护：有任务就拦截 ── */
   useEffect(() => {
@@ -287,7 +317,7 @@ export default function App() {
       </header>
 
       {/* ── Upload ── */}
-      {mode === 'upload' && <UploadView onUpload={handleUpload} error={error} />}
+      {mode === 'upload' && <UploadView onUpload={handleUpload} error={error} history={history} onLoadHistory={loadHistory} onDeleteHistory={removeHistory} />}
 
       {/* ── Translating / Done ── */}
       {(mode === 'translating' || mode === 'done') && (
@@ -362,7 +392,7 @@ export default function App() {
                 className="inline-flex items-center gap-2 px-5 py-2 text-white rounded-lg text-sm font-medium
                            transition-all hover:shadow-lg hover:shadow-violet-200 hover:-translate-y-0.5 active:translate-y-0"
                 style={{ background: 'linear-gradient(135deg, #8b7fc7, #a89cc8)' }}>
-                <IconDownload /> 下载 ZIP
+                <IconDownload /> 下载 HTML
               </button>
               <button onClick={() => { if (locked) { if (!confirm('确定要开始新任务吗？当前翻译内容将丢失。')) return; } clear(); }}
                 className="inline-flex items-center gap-2 px-4 py-2 text-gray-600 bg-white/50 backdrop-blur-sm border border-white/30 rounded-lg text-sm hover:bg-white/70 transition-all shadow-sm">
@@ -485,7 +515,12 @@ function PageSidebar({
 /* ═══════════════════════════════════════════ */
 /*  Upload View                               */
 /* ═══════════════════════════════════════════ */
-function UploadView({ onUpload, error }: { onUpload: (f: File) => void; error: string }) {
+function UploadView({ onUpload, error, history, onLoadHistory, onDeleteHistory }: {
+  onUpload: (f: File) => void; error: string;
+  history: HistoryItem[];
+  onLoadHistory: (taskId: string) => void;
+  onDeleteHistory: (taskId: string) => void;
+}) {
   const [drag, setDrag] = useState(false);
   return (
     <div className="relative flex flex-col items-center justify-center min-h-[calc(100vh-5rem)] px-6">
@@ -514,6 +549,43 @@ function UploadView({ onUpload, error }: { onUpload: (f: File) => void; error: s
         {error && (
           <div className="mt-4 p-3 bg-red-50 border border-red-100 rounded-lg text-red-600 text-sm text-center flex items-center justify-center gap-2 animate-fade-in">
             <IconAlert /> {error}
+          </div>
+        )}
+
+        {/* ── 历史翻译文献 ── */}
+        {history.length > 0 && (
+          <div className="mt-8">
+            <div className="flex items-center gap-2 mb-3">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-violet-400">
+                <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
+              </svg>
+              <span className="text-sm font-semibold text-gray-500">历史翻译</span>
+              <span className="text-xs text-gray-300 ml-auto">{history.length} 篇</span>
+            </div>
+            <div className="space-y-2 max-h-64 overflow-y-auto sidebar-scroll pr-1">
+              {history.map(item => (
+                <div key={item.task_id}
+                  className="group flex items-center gap-3 px-4 py-2.5 rounded-xl border border-white/40 bg-white/40 backdrop-blur-sm hover:bg-white/70 hover:border-violet-200 transition-all cursor-pointer"
+                  onClick={() => onLoadHistory(item.task_id)}>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium text-gray-700 truncate">{item.filename}</div>
+                    <div className="text-xs text-gray-400 mt-0.5">
+                      {item.page_count} 页
+                      {item.quality?.total_blocks ? ` · ${item.quality.total_blocks} 块` : ''}
+                      {item.quality?.pass_rate ? ` · 通过率 ${item.quality.pass_rate}` : ''}
+                      <span className="ml-2">{new Date(item.created_at * 1000).toLocaleDateString('zh-CN')}</span>
+                    </div>
+                  </div>
+                  <button onClick={e => { e.stopPropagation(); if (confirm(`确定删除「${item.filename}」的翻译记录？`)) onDeleteHistory(item.task_id); }}
+                    className="opacity-0 group-hover:opacity-100 p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 transition-all"
+                    title="删除">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                    </svg>
+                  </button>
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </div>

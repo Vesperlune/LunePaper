@@ -1,0 +1,70 @@
+# ══════════════════════════════════════════
+#  Paper Translator — .gitignore
+# ═══════════════════════════════════════════
+
+# ── 模型文件（体积大，单独下载） ──
+*.gguf
+
+# ── 编译产物 ─
+*.dll
+*.so
+*.dylib
+*.pdb
+*.exp
+*.lib
+
+history/
+# ── llama.cpp 源码（外部依赖，自行克隆编译） ──
+llama.cpp/
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── 虚拟环境 ─
+.venv/
+venv/
+env/
+.env
+
+# ── 前端 ──
+frontend/node_modules/
+frontend/dist/
+
+# ── 用户上传 & 运行时临时文件 ──
+uploads/
+*.tmp
+
+# ── 背景图 & 公开资源（按需提交） ──
+background/
+frontend/public/bg.png
+frontend/public/maid.png
+frontend/public/maid_small.png
+frontend/public/logo.jpg
+
+# ── IDE ──
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS ──
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── 测试 & 覆盖率 ──
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── Jupyter ──
+.ipynb_checkpoints/
