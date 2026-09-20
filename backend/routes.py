@@ -8,7 +8,7 @@ from backend.task_manager import task_manager
 
 router = APIRouter(prefix="/api")
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
-
+_gpu_lock = threading.Lock()
 
 from config import get as cfg
 
@@ -16,6 +16,14 @@ class TranslateRequest(BaseModel):
     dpi: int = cfg('ocr', 'dpi', default=144)
     start_page: int = 0
     end_page: int | None = None
+    ocr_model: str | None = None  # "unlimited" | "ovis"
+
+
+@router.get("/ocr-models")
+async def get_ocr_models():
+    """Get list of registered OCR models and their disk availability."""
+    from config import list_ocr_models
+    return list_ocr_models()
 
 
 @router.post("/upload")
@@ -52,20 +60,28 @@ async def start_translation(task_id: str, req: TranslateRequest = None):
     if task.status == "translating":
         raise HTTPException(400, "Already translating")
 
+    if not _gpu_lock.acquire(blocking=False):
+        raise HTTPException(409, "Another translation task is currently running on the GPU. Please wait for it to finish.")
+
     if req is None:
         req = TranslateRequest()
 
-    # Start translation in background thread
-    cancel_event = threading.Event()
-    task_manager.set_cancel_event(task_id, cancel_event)
-    task_manager.update(task_id, status="translating", total_pages=task.page_count)
+    try:
+        # Start translation in background thread
+        cancel_event = threading.Event()
+        task_manager.set_cancel_event(task_id, cancel_event)
+        task_manager.update(task_id, status="translating", total_pages=task.page_count)
 
-    from backend.worker import run_translation
-    thread = threading.Thread(
-        target=run_translation,
-        args=(task, req.dpi, cancel_event),
-        daemon=True)
-    thread.start()
+        from backend.worker import run_translation
+        thread = threading.Thread(
+            target=run_translation,
+            args=(task, req.dpi, cancel_event, req.start_page, req.end_page, _gpu_lock, req.ocr_model),
+            daemon=True)
+        thread.start()
+    except Exception:
+        if _gpu_lock.locked():
+            _gpu_lock.release()
+        raise
 
     return {"task_id": task_id, "status": "started"}
 
@@ -85,20 +101,58 @@ async def cancel_translation(task_id: str):
         raise HTTPException(404, "Task not found")
     if task._cancel_event:
         task._cancel_event.set()
-    task_manager.update(task, status="failed", error="Cancelled by user")
+    task_manager.update(task_id, status="failed", error="Cancelled by user")
     return {"status": "cancelled"}
+
+
+_KATEX_CSS = None
+_KATEX_JS = None
+_KATEX_AUTORENDER_JS = None
+
+
+def _get_katex_assets():
+    """Load local KaTeX CSS, JS, and auto-render JS from frontend node_modules if available."""
+    global _KATEX_CSS, _KATEX_JS, _KATEX_AUTORENDER_JS
+    if _KATEX_CSS is None:
+        try:
+            katex_dir = os.path.normpath(
+                os.path.join(os.path.dirname(__file__), "..", "frontend", "node_modules", "katex", "dist")
+            )
+            css_path = os.path.join(katex_dir, "katex.min.css")
+            js_path = os.path.join(katex_dir, "katex.min.js")
+            auto_path = os.path.join(katex_dir, "contrib", "auto-render.min.js")
+
+            if os.path.exists(css_path) and os.path.exists(js_path) and os.path.exists(auto_path):
+                with open(css_path, "r", encoding="utf-8") as f:
+                    css = f.read()
+                # Rewrite relative font URLs to CDN URLs so fonts load nicely online, while fallbacks work offline
+                css = css.replace("url(fonts/", "url(https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/fonts/")
+                _KATEX_CSS = css
+
+                with open(js_path, "r", encoding="utf-8") as f:
+                    _KATEX_JS = f.read()
+
+                with open(auto_path, "r", encoding="utf-8") as f:
+                    _KATEX_AUTORENDER_JS = f.read()
+        except Exception as e:
+            pass
+    return _KATEX_CSS, _KATEX_JS, _KATEX_AUTORENDER_JS
 
 
 @router.get("/download/{task_id}")
 async def download_result(task_id: str):
     """Download bilingual HTML with embedded images."""
     import base64
+    from infer.ovis_parser import clean_latex_math
 
     task = task_manager.get(task_id)
     if not task:
         raise HTTPException(404, "Task not found")
     if task.status != "completed":
         raise HTTPException(400, "Translation not completed yet")
+
+    if not task.blocks:
+        task = task_manager.load_task_blocks(task_id) or task
 
     # Build figure lookup: basename -> base64 data URI
     fig_data = {}
@@ -108,6 +162,17 @@ async def download_result(task_id: str):
                 b64 = base64.b64encode(f.read()).decode("ascii")
             fig_data[os.path.basename(fig_path)] = f"data:image/png;base64,{b64}"
 
+    # KaTeX Assets
+    k_css, k_js, k_auto = _get_katex_assets()
+    if k_css and k_js:
+        katex_tags = f"""<style id="katex-embedded-css">{k_css}</style>
+<script id="katex-embedded-js">{k_js}</script>
+<script id="katex-autorender-embedded-js">{k_auto or ''}</script>"""
+    else:
+        katex_tags = """<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js"></script>"""
+
     # Build HTML
     parts = []
     parts.append(f"""<!DOCTYPE html>
@@ -116,8 +181,7 @@ async def download_result(task_id: str):
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>{_esc(task.filename)} - LunePaper</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+{katex_tags}
 <style>
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
   body {{
@@ -237,6 +301,47 @@ async def download_result(task_id: str):
     color: #2d2a3e;
     line-height: 1.7;
   }}
+  .table-container {{
+    margin: 0.8rem 0;
+    overflow-x: auto;
+    border-radius: 8px;
+    border: 1px solid #e8e3f3;
+    background: #fff;
+    box-shadow: 0 1px 4px rgba(139, 127, 199, 0.04);
+  }}
+  table {{
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.88rem;
+    color: #2d2a3e;
+    text-align: left;
+  }}
+  th, td {{
+    padding: 0.7rem 0.9rem;
+    border-bottom: 1px solid #f0ecf8;
+    border-right: 1px solid #f0ecf8;
+    line-height: 1.5;
+  }}
+  th:last-child, td:last-child {{
+    border-right: none;
+  }}
+  tr:last-child td {{
+    border-bottom: none;
+  }}
+  thead tr, tr:first-child:not(:has(th)) {{
+    background: #f8f6fc;
+  }}
+  th {{
+    font-weight: 600;
+    color: #5b4ea8;
+    background: #f8f6fc;
+  }}
+  tr:hover td {{
+    background: rgba(139, 127, 199, 0.03);
+  }}
+  table .katex {{
+    font-size: 0.95em;
+  }}
   .separator {{
     height: 1px;
     background: linear-gradient(to right, #e8e3f3, transparent);
@@ -283,25 +388,17 @@ async def download_result(task_id: str):
                 parts.append(f'<div class="figure"><div class="caption">[{_esc(btype)}] (图片未找到)</div></div>\n')
             continue
 
-        # Equation blocks — store LaTeX in data attribute, render with KaTeX JS
+        # Equation blocks — store formatted LaTeX, rendered by KaTeX
         if btype == 'equation':
-            # Strip $$ delimiters (KaTeX displayMode handles formatting)
-            latex = en.strip()
-            if latex.startswith('$$'):
-                latex = latex[2:]
-            if latex.endswith('$$'):
-                latex = latex[:-2]
-            latex = latex.strip()
-            # Sanitize for HTML attribute: collapse whitespace, escape special chars
-            latex = latex.replace('\n', ' ').replace('\r', ' ')
-            latex = ' '.join(latex.split())  # collapse multiple spaces
-            latex = latex.replace('&', '&amp;').replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
-            parts.append(f'<div class="block"><div class="block-type">equation</div><div class="math-block" data-latex="{latex}"></div></div>\n')
+            latex = clean_latex_math(en.strip())
+            if not latex.startswith('$$'):
+                latex = f"$${latex}$$"
+            parts.append(f'<div class="block"><div class="block-type">equation</div><div class="math-block">{latex}</div></div>\n')
             continue
 
         # Table blocks
         if btype == 'table':
-            parts.append(f'<div class="block"><div class="block-type">table</div><div class="passthrough">{en}</div></div>\n')
+            parts.append(f'<div class="block"><div class="block-type">table</div><div class="table-container">{en}</div></div>\n')
             continue
 
         # Title blocks — larger font
@@ -336,28 +433,34 @@ async def download_result(task_id: str):
         parts.append('</div>\n')
 
     parts.append('<script>')
-    parts.append('document.addEventListener("DOMContentLoaded", function() {')
-    parts.append('  // Render standalone equation blocks from data-latex')
-    parts.append('  document.querySelectorAll(".math-block").forEach(function(el) {')
-    parts.append('    var latex = el.getAttribute("data-latex");')
-    parts.append('    if (latex && typeof katex !== "undefined") {')
-    parts.append('      katex.render(latex, el, { displayMode: true, throwOnError: false });')
-    parts.append('    } else if (latex) { el.textContent = latex; }')
-    parts.append('  });')
-    parts.append('  // Render inline math $...$ within text content')
-    parts.append('  if (typeof katex !== "undefined") {')
-    parts.append('    var unesc = function(s) { return s.replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,\'"\'); };')
-    parts.append('    document.querySelectorAll(".en, .zh, .passthrough, .title-text").forEach(function(el) {')
-    parts.append('      var html = el.innerHTML;')
-    parts.append('      if (html.indexOf("$") === -1) return;')
-    parts.append('      var result = html.replace(/\\$([^\\$\\n]+?)\\$/g, function(m, latex) {')
-    parts.append('        try { return katex.renderToString(unesc(latex), { throwOnError: false }); }')
-    parts.append('        catch(e) { return m; }')
-    parts.append('      });')
-    parts.append('      if (result !== html) el.innerHTML = result;')
+    parts.append('function renderAllMath() {')
+    parts.append('  if (typeof renderMathInElement !== "undefined") {')
+    parts.append('    renderMathInElement(document.body, {')
+    parts.append('      delimiters: [')
+    parts.append('        {left: "$$", right: "$$", display: true},')
+    parts.append('        {left: "\\[", right: "\\]", display: true},')
+    parts.append('        {left: "$", right: "$", display: false},')
+    parts.append('        {left: "\\(", right: "\\)", display: false}')
+    parts.append('      ],')
+    parts.append('      throwOnError: false,')
+    parts.append('      ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"]')
     parts.append('    });')
     parts.append('  }')
-    parts.append('});')
+    parts.append('  if (typeof katex !== "undefined") {')
+    parts.append('    document.querySelectorAll(".math-block").forEach(function(el) {')
+    parts.append('      if (el.querySelector(".katex")) return;')
+    parts.append('      var txt = el.textContent.trim();')
+    parts.append('      if (txt.startsWith("$$") && txt.endsWith("$$")) txt = txt.slice(2, -2).trim();')
+    parts.append('      try { katex.render(txt, el, { displayMode: true, throwOnError: false }); } catch(e) {}')
+    parts.append('    });')
+    parts.append('  }')
+    parts.append('}')
+    parts.append('if (document.readyState === "loading") {')
+    parts.append('  document.addEventListener("DOMContentLoaded", renderAllMath);')
+    parts.append('} else {')
+    parts.append('  renderAllMath();')
+    parts.append('}')
+    parts.append('window.addEventListener("load", renderAllMath);')
     parts.append('</script>')
     parts.append('</body>\n</html>')
 
@@ -442,16 +545,29 @@ async def get_page_image(task_id: str, page_num: int, dpi: int = 72):
 
     # Render from PDF if available
     task = task_manager.get(task_id)
-    if not task or not task.pdf_path:
-        raise HTTPException(404, "Page image not available")
+    pdf_target = task.pdf_path if task and task.pdf_path and os.path.isfile(task.pdf_path) else None
+    if not pdf_target:
+        from backend.task_manager import _task_dir
+        hist_pdf = os.path.join(_task_dir(task_id), "document.pdf")
+        upload_pdf = os.path.join(UPLOAD_DIR, f"{task_id}.pdf")
+        if os.path.isfile(hist_pdf):
+            pdf_target = hist_pdf
+            if task: task.pdf_path = hist_pdf
+        elif os.path.isfile(upload_pdf):
+            pdf_target = upload_pdf
+            if task: task.pdf_path = upload_pdf
+        else:
+            raise HTTPException(404, "Page image not available")
 
     import fitz
     os.makedirs(page_dir, exist_ok=True)
-    doc = fitz.open(task.pdf_path)
-    idx = page_num - 1
-    if idx < 0 or idx >= len(doc):
-        raise HTTPException(404, "Page out of range")
-    pix = doc[idx].get_pixmap(dpi=dpi)
-    pix.save(page_path)
-    doc.close()
+    doc = fitz.open(pdf_target)
+    try:
+        idx = page_num - 1
+        if idx < 0 or idx >= len(doc):
+            raise HTTPException(404, "Page out of range")
+        pix = doc[idx].get_pixmap(dpi=dpi)
+        pix.save(page_path)
+    finally:
+        doc.close()
     return FileResponse(page_path, media_type="image/png")

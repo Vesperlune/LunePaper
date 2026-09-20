@@ -17,7 +17,7 @@
 | `POST` | `/api/upload` | 上传 PDF → `task_id` |
 | `POST` | `/api/translate/{id}` | 启动翻译 |
 | `GET` | `/api/status/{id}` | 查询进度 |
-| `GET` | `/api/download/{id}` | 下载 Markdown + 图片 ZIP |
+| `GET` | `/api/download/{id}` | 下载渲染好的双语对照 HTML 文件 |
 | `GET` | `/api/image/{id}/{name}` | 截取图片 |
 | `WS` | `/ws/{id}` | 实时进度推送 |
 
