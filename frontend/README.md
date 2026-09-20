@@ -16,7 +16,7 @@ React + TypeScript + TailwindCSS + Vite
 ```
 Upload          拖拽上传 PDF
 Translating     进度条 + 双语预览区（逐块实时渲染）
-Done            完整对照 + 下载 ZIP
+Done            完整对照 + 下载 HTML
 ```
 
 ## 块渲染

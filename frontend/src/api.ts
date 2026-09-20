@@ -8,12 +8,43 @@ export async function uploadPdf(file: File) {
   return res.json();
 }
 
-export async function startTranslation(taskId: string, dpi = 144) {
+export interface OcrModelInfo {
+  id: string;
+  name: string;
+  description: string;
+  vram_estimate_mb: number;
+  is_default: boolean;
+  available: boolean;
+}
+
+export async function getOcrModels(): Promise<OcrModelInfo[]> {
+  const res = await fetch(`${BASE}/api/ocr-models`);
+  if (!res.ok) return [];
+  return res.json();
+}
+
+export async function startTranslation(
+  taskId: string,
+  dpi = 144,
+  startPage = 0,
+  endPage: number | null = null,
+  ocrModel?: string
+) {
+  const payload: Record<string, unknown> = { dpi, start_page: startPage };
+  if (endPage !== null) payload.end_page = endPage;
+  if (ocrModel) payload.ocr_model = ocrModel;
+
   const res = await fetch(`${BASE}/api/translate/${taskId}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ dpi }),
+    body: JSON.stringify(payload),
   });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function cancelTranslation(taskId: string) {
+  const res = await fetch(`${BASE}/api/cancel/${taskId}`, { method: 'POST' });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { createWs } from '../api';
+import type { WsEvent } from '../types';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function useWebSocket(

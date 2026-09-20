@@ -19,7 +19,8 @@ export interface BlockData {
 }
 
 export interface WsEvent {
-  type: 'start' | 'page_start' | 'block_done' | 'figure' |
+  type: 'start' | 'phase' | 'ocr_progress' | 'ocr_page_blocks' |
+        'translate_progress' | 'page_start' | 'block_done' | 'figure' |
         'page_done' | 'quality' | 'complete' | 'error';
   [key: string]: unknown;
 }
