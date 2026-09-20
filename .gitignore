@@ -1,70 +1,94 @@
 # ══════════════════════════════════════════
-#  Paper Translator — .gitignore
-# ═══════════════════════════════════════════
+#  Paper Translator (LunePaper) — .gitignore
+# ══════════════════════════════════════════
 
-# ── 模型文件（体积大，单独下载） ──
+# ── 大模型文件（体积巨大，单独下载放置于根目录） ──
 *.gguf
+*.bin
+*.pt
+*.safetensors
+test_model/
+test_models/
+models/
 
-# ── 编译产物 ─
+# ── C/C++ 动态链接库与编译产物 ──
 *.dll
 *.so
 *.dylib
 *.pdb
 *.exp
 *.lib
+*.obj
+*.o
+*.a
 
-history/
-# ── llama.cpp 源码（外部依赖，自行克隆编译） ──
+# ── 外部依赖与编译目录 ──
 llama.cpp/
+build/
+build_min/
+dist/
 
-# ── Python ──
+# ── Python 运行时与虚拟环境 ──
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
 .Python
 *.egg-info/
-dist/
-build/
 .eggs/
-
-# ── 虚拟环境 ─
 .venv/
 venv/
 env/
 .env
+.env.*
+!.env.example
 
-# ── 前端 ──
+# ── 前端依赖与产物 ──
 frontend/node_modules/
 frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+.eslintcache
 
-# ── 用户上传 & 运行时临时文件 ──
+# ── 运行日志与调试文件 ──
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ── 用户任务数据、历史缓存与临时文件 ──
 uploads/
+history/
+temp/
+tmp/
 *.tmp
+*.bak
 
-# ── 背景图 & 公开资源（按需提交） ──
+# ── 开发辅助、基准测试与临时分析脚本 ──
+scratch/
+.agents/
+.system_generated/
+
+# ── 背景图 & 公开资源（按需保留） ──
 background/
 frontend/public/bg.png
 frontend/public/maid.png
 frontend/public/maid_small.png
 frontend/public/logo.jpg
 
-# ── IDE ──
+# ── IDE 与系统文件 ──
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
-
-# ── OS ──
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# ── 测试 & 覆盖率 ──
+# ── 测试与覆盖率 ──
 .pytest_cache/
 .coverage
 htmlcov/
-
-# ── Jupyter ──
 .ipynb_checkpoints/
