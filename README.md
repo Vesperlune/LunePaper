@@ -1,5 +1,9 @@
 <div align="center">
 
+<img src="assets/title.png" width="100%" style="border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,0.12);" />
+
+<br><br>
+
 <img src="assets/logo.jpg" width="120" height="120" style="border-radius:50%;border:3px solid rgba(59,130,246,0.3);box-shadow:0 4px 20px rgba(59,130,246,0.15);" />
 
 # 月读 · LunePaper
