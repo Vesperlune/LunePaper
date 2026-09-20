@@ -2,9 +2,33 @@
 
 # ── 模型路径 ──
 models:
+  translation: "Hy-MT2-1.8B-Q8_0.gguf"
+
+  # OCR 引擎配置（支持多模型动态切换）
+  ocr_default: "unlimited"  # 可选: "unlimited" | "ovis"
+  ocr_engines:
+    unlimited:
+      id: "unlimited"
+      name: "Unlimited-OCR"
+      description: "DeepSeek2-OCR (3B MoE 64×550M), Q8_0, VRAM ~6.0GB"
+      model_path: "Unlimited-OCR-Q8_0.gguf"
+      mmproj_path: "mmproj-Unlimited-OCR-F16.gguf"
+      prompt_fmt: "{marker}document parsing."
+      vram_estimate_mb: 5950
+      reading_order_sorted: true  # 是否需要空间拓扑阅读顺序重排
+    ovis:
+      id: "ovis"
+      name: "OvisOCR2"
+      description: "Qwen-VL (0.8B Dense 752M), Q8_0, VRAM ~1.7GB"
+      model_path: "OvisOCR2-Q8_0.gguf"
+      mmproj_path: "mmproj-BF16.gguf"
+      prompt_fmt: "<|im_start|>user\n{marker}Extract all readable content from the image in natural human reading order and output the result as a single Markdown document.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+      vram_estimate_mb: 1730
+      reading_order_sorted: false # 原生自然阅读顺序输出，无需额外重排
+
+  # 向下兼容历史单模型配置
   ocr: "Unlimited-OCR-Q8_0.gguf"
   mmproj: "mmproj-Unlimited-OCR-F16.gguf"
-  translation: "Hy-MT2-1.8B-Q8_0.gguf"
 
 # ── GPU 设置 ──
 gpu:
@@ -14,8 +38,12 @@ gpu:
 # ── OCR 参数 ──
 ocr:
   max_tokens: 4096       # 每页最大输出 token 数
-  n_ctx: 4096            # 上下文窗口
+  n_ctx: 8192            # 上下文窗口（扩容至 8192 杜绝长页截断）
   dpi: 144               # PDF 渲染 DPI
+  penalty_last_n: 256    # 采样惩罚回溯窗口
+  penalty_repeat: 1.20   # 重复采样惩罚
+  penalty_freq: 0.20     # 词频惩罚 (抑制死循环)
+  penalty_present: 0.05  # 存在惩罚
 
 # ── 翻译参数 ──
 translation:
@@ -27,6 +55,12 @@ translation:
   verify_strategy: "adaptive"  # adaptive: 保守快速放行 + 回译兜底；full: 全量回译
   verify_audit_rate: 0.10       # 快速放行段落中仍执行完整回译的固定抽检比例
   max_retries: 2         # 最大重译次数
+
+# ── 学术术语库与约束配置 ──
+glossary:
+  enabled: true          # 启用多领域学术术语库与动态约束注入
+  post_correction: true  # 启用译后学术规范与去机翻自动化校正
+  overlap_chunking: true # 启用长句重叠平滑分块
 
 # ── 采样参数 ──
 sampling:
