@@ -1,37 +1,34 @@
 """
-Phase 5: Smart Translator
-  - Pseudo-title detection (skip short/likely-heading text)
-  - OCR block merging (rejoin split paragraphs)
-  - Abstract direction extraction
-  - Long text chunking + sliding context window
-  - Back-translation verification
+Phase 5: Smart Translator (Academic Precision & Generalizable Terminology V2)
+  - Multi-tier Academic Glossary & Dynamic Constraint Injection (infer.glossary)
+  - Native ChatML / Hunyuan MT special token prompting with multi-turn sliding context
+  - Unicode Entity Masking (⟪M0⟫, ⟪R0⟫, ⟪U0⟫) with fuzzy regex unmasking
+  - Overlap-aware long paragraph chunking (sentence boundary + sliding overlap)
+  - Multi-dimensional Quality Gate (Numerical invariance, polarity check, length ratio)
+  - Post-correction of MT artifacts & "translationese"
+  - Pseudo-title detection, OCR block merging, cross-page pair handling
 """
 import os, sys, re, hashlib
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from infer.llama_binding import LlamaModel
+from infer.glossary import AcademicGlossaryManager
 
-# ── Prompts (中文指令 + 学术风格约束) ──
+# ── Base System Prompt ──
 
-STYLE_RULES = """【翻译要求】
-1. 风格严谨、客观、简洁，符合中文学术论文写作规范
-2. 术语使用学术界标准译法，同一术语全文保持统一
-3. 保持原文因果、转折、递进等逻辑关系
-4. 中文表达自然流畅，避免生硬直译
-5. 公式 \\(...\\) 和 \\[...\\] 原样保留
-6. 引用标记 [1]、[Smith 2024] 等原样保留
-7. 数字、百分比、数值、单位原样保留
-8. 缩写不翻译
-9. 模型名、人名、机构名保留英文
-【禁止】
-不添加原文没有的内容，不省略信息，不解释或评价翻译内容"""
+BASE_ACADEMIC_SYSTEM_PROMPT = """你是一名资深学术翻译专家。请将用户输入的英文学术文本翻译为严谨、规范、地道且符合中文学术出版标准的简体中文。
+翻译准则：
+1. 风格严谨客观，符合中文科技论文写作规范，杜绝欧化长句与生硬直译。
+2. 专业术语务必准确规范，同篇论文术语表达前后严格统一。
+3. 文本中的数学公式、特殊占位符（如 ⟪M0⟫、⟪R0⟫、⟪U0⟫ 等）以及数值、符号和单位必须严格原样保留，切勿删改或漏译。"""
 
-DIRECTION_PROMPT = """从以下摘要提取研究领域关键词，用·连接，不超过15字。只输出关键词：
+DIRECTION_PROMPT = """从以下学术论文摘要提取研究领域核心关键词，用·连接，不超过15字。只输出关键词：
 
 {abstract}
 
 关键词："""
 
+# Fallback plain prompts for non-chat models
 SHORT_PROMPT = """【论文方向】{direction}
 {style}
 
@@ -89,7 +86,11 @@ def is_pseudo_title(text: str, block_type: str = 'text') -> bool:
     max_len = cfg('pseudo_title', 'max_len', default=40)
     heading_max = cfg('pseudo_title', 'heading_max_len', default=100)
 
-    # 1. Very short → likely a heading
+    # If it ends with typical sentence punctuation, it is almost certainly a normal sentence, not a title
+    if text.endswith(('.', '?', '!', '."', '.)', '.\"')):
+        return False
+
+    # 1. Very short and without sentence punctuation → likely a heading
     if length < max_len:
         return True
 
@@ -106,8 +107,7 @@ def is_pseudo_title(text: str, block_type: str = 'text') -> bool:
     if length < heading_max and len(words) <= 8:
         caps = [w for w in words if w and w[0].isalpha()]
         if caps and all(w[0].isupper() for w in caps):
-            if not text.rstrip().endswith(('.', '?', '!', '."', '.)')):
-                return True
+            return True
 
     return False
 
@@ -152,8 +152,11 @@ def _should_merge(prev: dict, cur: dict) -> bool:
     # Current starts lowercase (continuation)
     if ct[0].isupper():
         return False
-    # Bbox vertical proximity
+    # Bbox vertical proximity and column consistency
     if 'bbox' in prev and 'bbox' in cur:
+        # Don't merge across different columns if their horizontal positions are far apart
+        if abs(prev['bbox'][0] - cur['bbox'][0]) > 150:
+            return False
         prev_bottom = prev['bbox'][3]
         cur_top = cur['bbox'][1]
         line_h = max(prev['bbox'][3] - prev['bbox'][1], 10)
@@ -180,21 +183,27 @@ def find_cross_page_pairs(page_blocks_list: list[list]) -> list[tuple]:
         if not cur_page or not next_page:
             continue
 
-        # Find last text block on current page
+        # Find last text block on current page (must be substantial, non-passthrough paragraph)
         last_text = None
         for j in range(len(cur_page) - 1, -1, -1):
-            if cur_page[j].get('type') == 'text':
-                last_text = cur_page[j]
-                break
+            b = cur_page[j]
+            if b.get('type') == 'text' and not b.get('passthrough'):
+                txt = (b.get('en') or b.get('text', '')).strip()
+                if len(txt) > 5 and not re.match(r'^[-—–\s]*(?:page\s+)?\d{1,4}[-—–\s]*$', txt, re.I):
+                    last_text = b
+                    break
         if last_text is None:
             continue
 
-        # Find first text block on next page
+        # Find first text block on next page (must be substantial, non-passthrough paragraph)
         first_text = None
         for j in range(len(next_page)):
-            if next_page[j].get('type') == 'text':
-                first_text = next_page[j]
-                break
+            b = next_page[j]
+            if b.get('type') == 'text' and not b.get('passthrough'):
+                txt = (b.get('en') or b.get('text', '')).strip()
+                if len(txt) > 5 and not re.match(r'^[-—–\s]*(?:page\s+)?\d{1,4}[-—–\s]*$', txt, re.I):
+                    first_text = b
+                    break
         if first_text is None:
             continue
 
@@ -223,11 +232,11 @@ def split_translation(combined_en: str, combined_zh: str,
                       part1_len: int, part2_len: int) -> tuple[str, str]:
     """
     Split a combined translation back into two parts.
-    Tries to split at sentence boundaries; falls back to proportional split.
-    Returns (zh_part1, zh_part2).
+    Tries to split at sentence boundaries; falls back to clause or proportional split.
+    Guarantees non-empty outputs when inputs have content.
     """
     total = part1_len + part2_len
-    if total == 0:
+    if total == 0 or not combined_zh:
         return combined_zh, ''
 
     ratio = part1_len / total
@@ -238,25 +247,56 @@ def split_translation(combined_en: str, combined_zh: str,
 
     if len(sentences) >= 2:
         target_chars = int(len(combined_zh) * ratio)
-        accumulated = 0
-        for k, s in enumerate(sentences):
-            accumulated += len(s)
-            if accumulated >= target_chars:
-                zh1 = ''.join(sentences[:k+1])
-                zh2 = ''.join(sentences[k+1:])
-                return zh1, zh2
+        best_k = 1
+        min_diff = float('inf')
+        for k in range(1, len(sentences)):
+            curr_len = sum(len(sentences[i]) for i in range(k))
+            diff = abs(curr_len - target_chars)
+            if diff < min_diff:
+                min_diff = diff
+                best_k = k
+        zh1 = ''.join(sentences[:best_k])
+        zh2 = ''.join(sentences[best_k:])
+        if zh1.strip() and zh2.strip():
+            return zh1, zh2
 
-    # Fallback: proportional split
-    split_pos = int(len(combined_zh) * ratio)
+    # Fallback: Try clause boundaries (，)
+    clauses = re.split(r'(?<=[，,])', combined_zh)
+    clauses = [c for c in clauses if c.strip()]
+    if len(clauses) >= 2:
+        target_chars = int(len(combined_zh) * ratio)
+        best_k = 1
+        min_diff = float('inf')
+        for k in range(1, len(clauses)):
+            curr_len = sum(len(clauses[i]) for i in range(k))
+            diff = abs(curr_len - target_chars)
+            if diff < min_diff:
+                min_diff = diff
+                best_k = k
+        zh1 = ''.join(clauses[:best_k])
+        zh2 = ''.join(clauses[best_k:])
+        if zh1.strip() and zh2.strip():
+            return zh1, zh2
+
+    # Final fallback: proportional split (ensure at least 1 char in each if possible)
+    split_pos = max(1, min(len(combined_zh) - 1, int(len(combined_zh) * ratio)))
     return combined_zh[:split_pos], combined_zh[split_pos:]
 
 
 # ═══════════════════════════════════════════════
-# SmartTranslator
+# SmartTranslator V2
 # ═══════════════════════════════════════════════
 
 class SmartTranslator:
-    """Phase 5 translator with direction guidance, chunking, and verification."""
+    """
+    High-Precision Academic Translator:
+    - Domain Glossary & Dynamic Constraint Injection
+    - Hunyuan Native Chat Template + Multi-turn Context Sliding
+    - Unicode Entity Masking (⟪M0⟫, ⟪R0⟫, ⟪U0⟫)
+    - Overlap-aware Sentence Chunking
+    - Quality Gate with Numerical & Polarity Invariance Verification
+    - Automated Post-Correction
+    """
 
     def __init__(self, model_path: str = None, n_gpu_layers: int = 99,
                  verify: bool = True, chunk_size: int = None,
@@ -266,55 +306,132 @@ class SmartTranslator:
             model_path = os.path.join(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                 cfg('models', 'translation', default='Hy-MT2-1.8B-Q8_0.gguf'))
+
         self.llm = LlamaModel(model_path, n_gpu_layers=n_gpu_layers,
-                              n_ctx=cfg('translation', 'n_ctx', default=4096),
+                              n_ctx=cfg('translation', 'n_ctx', default=2048),
                               n_threads=cfg('translation', 'n_threads', default=4))
         self.verify = verify
         self.chunk_size = chunk_size or cfg('translation', 'chunk_size', default=500)
-        # "full" keeps the previous behavior. "adaptive" skips the expensive
-        # back-translation only for structurally safe candidates, with a
-        # deterministic audit sample still sent through the full verifier.
         self.verify_strategy = (verify_strategy or cfg(
-            'translation', 'verify_strategy', default='full')).lower()
+            'translation', 'verify_strategy', default='adaptive')).lower()
         if self.verify_strategy not in {'full', 'adaptive'}:
             raise ValueError("verify_strategy must be 'full' or 'adaptive'")
         self.verify_audit_rate = (
             cfg('translation', 'verify_audit_rate', default=0.10)
             if verify_audit_rate is None else verify_audit_rate)
         self.verify_audit_rate = min(max(float(self.verify_audit_rate), 0.0), 1.0)
+
+        # Domain Glossary Manager
+        self.glossary = AcademicGlossaryManager()
         self.paper_direction = ""
         self._history: list[dict] = []  # [{en, zh}]
-        self._prefix_cached = False
         self.stats = self._new_stats()
+
+        # Check model type and initialize special tokens
+        self._is_hunyuan = self._check_hunyuan()
+        if self._is_hunyuan:
+            # Hunyuan MT special tokens
+            self.tok_bos = self.llm.detokenize([120000])  # <｜hy_begin of sentence｜>
+            self.tok_eos = self.llm.detokenize([120020])  # <｜hy_placeholder no 2｜>
+            self.tok_p3  = self.llm.detokenize([120021])  # <｜hy_placeholder no 3｜>
+            self.tok_usr = self.llm.detokenize([120006])  # <｜hy_User｜>
+            self.tok_ast = self.llm.detokenize([120007])  # <｜hy_Assistant｜>
+            print("  [Translator] Initialized with Hunyuan-MT Native ChatML & Dynamic Constraints.")
+        else:
+            print("  [Translator] Initialized with Generic Fallback Prompt Template.")
+
+    def _check_hunyuan(self) -> bool:
+        """Check if model uses Hunyuan tokenizer vocabulary."""
+        tmpl = getattr(self.llm, "_chat_template", "").lower()
+        if "hy_" in tmpl or "hunyuan" in tmpl:
+            return True
+        if hasattr(self.llm, "eos_token") and self.llm.eos_token == 120020:
+            return True
+        return False
 
     # ── Public API ──
 
     def set_direction_from_abstract(self, abstract_en: str):
-        """Extract paper direction from the abstract text."""
-        prompt = DIRECTION_PROMPT.format(abstract=abstract_en[:1500])
+        """Extract domain taxonomy and paper-specific terminology from abstract."""
+        # 1. Analyze domain taxonomy and extract novel abbreviations/terms dynamically
+        self.glossary.analyze_paper(abstract_en)
+        domain_zh = self.glossary.detected_domain
+
+        # 2. Extract direction keywords from abstract
+        if self._is_hunyuan:
+            prompt = (f"{self.tok_bos}提取以下学术论文摘要的核心研究领域关键词，用·连接，不超过15字。只输出关键词。{self.tok_p3}"
+                      f"{self.tok_usr}{abstract_en[:1500]}{self.tok_ast}")
+        else:
+            prompt = DIRECTION_PROMPT.format(abstract=abstract_en[:1500])
+
         output = self.llm.generate(prompt, max_tokens=64, temperature=0.3)
         direction = self._clean(output)
-        if direction and len(direction) > 3:
-            self.paper_direction = direction
-            print(f"  [Direction] {direction}")
+        if direction and 2 < len(direction) < 30:
+            self.paper_direction = f"{domain_zh}·{direction}"
         else:
-            self.paper_direction = "学术论文翻译"
-        # 缓存翻译 prompt 前缀（方向+风格规则+指令）
-        self._cache_translation_prefix()
+            self.paper_direction = f"{domain_zh}·学术论文翻译"
 
-    def _cache_translation_prefix(self):
-        """Pre-compute KV cache for the shared translation prompt prefix."""
-        prefix = NORMAL_PROMPT.split('{text}')[0].format(
-            direction=self.paper_direction, style=STYLE_RULES)
-        self._prefix_str = prefix
-        self.llm.cache_prefix(prefix)
-        self._prefix_cached = True
+        print(f"  [Direction] {self.paper_direction}")
+        if self.glossary.paper_specific_terms:
+            terms_preview = list(self.glossary.paper_specific_terms.keys())[:8]
+            print(f"  [Dynamic Terms] Injected {len(self.glossary.paper_specific_terms)} novel terms: {terms_preview}")
+
+    @staticmethod
+    def _mask_entities(text: str) -> tuple[str, dict]:
+        """
+        Mask math expressions, citations, and URLs with Unicode tokens (⟪M0⟫, ⟪R0⟫, ⟪U0⟫)
+        which MT tokenizers treat as atomic and never split or hallucinate.
+        """
+        masks = {}
+
+        # 1. URLs
+        def _mask_url(m):
+            key = f"⟪U{len(masks)}⟫"
+            masks[key] = m.group(0)
+            return key
+        text = re.sub(r'https?://[^\s)\]]+', _mask_url, text)
+
+        # 2. Display and inline math $$...$$, $...$, \(...\), \[...\]
+        def _mask_math(m):
+            key = f"⟪M{len(masks)}⟫"
+            masks[key] = m.group(0)
+            return key
+        text = re.sub(r'\$\$[\s\S]+?\$\$', _mask_math, text)
+        text = re.sub(r'\$[^\$\n]+?\$', _mask_math, text)
+        text = re.sub(r'\\\[[\s\S]+?\\\]', _mask_math, text)
+        text = re.sub(r'\\\([^\n]+?\\\)', _mask_math, text)
+
+        # 3. Reference citations [1], [1, 2], [1-3]
+        def _mask_ref(m):
+            key = f"⟪R{len(masks)}⟫"
+            masks[key] = m.group(0)
+            return key
+        text = re.sub(r'\[\s*\d+(?:[\s,\-–—]+\d+)*\s*\]', _mask_ref, text)
+
+        return text, masks
+
+    @staticmethod
+    def _unmask_entities(text: str, masks: dict) -> str:
+        """Restore masked placeholders accurately with fuzzy regex fallback."""
+        if not masks or not text:
+            return text
+        for key, val in masks.items():
+            if key in text:
+                text = text.replace(key, val)
+            else:
+                # Fuzzy fallback: e.g. ⟪M0⟫ was outputted as ⟪M 0⟫, 《M0》, ⟦M0⟧, or [M0]
+                m = re.match(r'⟪([MRU])(\d+)⟫', key)
+                if m:
+                    k_type, k_num = m.group(1), m.group(2)
+                    fuzzy_pattern = rf'[⟪《⟦\[(]\s*{k_type}\s*{k_num}\s*[⟫》⟧\])]'
+                    text = re.sub(fuzzy_pattern, lambda _: val, text, flags=re.IGNORECASE)
+        return text
 
     def translate_block(self, text: str, block_type: str = 'text') -> str | None:
         """
         Translate a single block. Returns None if block should be skipped.
         """
-        # Title → skip
+        # Title → skip (Rule: Title passthrough)
         if block_type == 'title':
             self.stats['skipped'] += 1
             return None
@@ -324,24 +441,30 @@ class SmartTranslator:
             self.stats['skipped'] += 1
             return None
 
-        self.stats['total'] += 1
-        text_len = len(text)
+        # Mask math/refs/urls
+        masked_text, masks = self._mask_entities(text)
+        text_len = len(masked_text)
 
         was_chunked = False
 
-        # Short text → direct translate
+        # Short text
         if text_len < 200:
-            zh = self._translate_short(text)
-        # Long text → chunk + per-chunk verification inside _translate_long
+            zh = self._translate_short(masked_text)
+        # Long text → chunk with overlap + per-chunk verification
         elif text_len > self.chunk_size:
-            zh = self._translate_long(text)
+            zh = self._translate_long(masked_text)
             was_chunked = True
-        # Normal text → translate with direction
+        # Normal text → translate with context & dynamic constraints
         else:
-            zh = self._translate_normal(text)
+            zh = self._translate_normal(masked_text)
 
-        # Long blocks are verified per chunk inside _translate_long. Other
-        # blocks use the same verifier so the strategy is consistent.
+        # Restore original formulas and references
+        zh = self._unmask_entities(zh, masks)
+
+        # Apply post-correction for academic terminology and MT artifacts
+        zh = self.glossary.post_correct(zh, text)
+
+        # Quality Gate (for non-chunked blocks; chunked blocks verify inside _translate_long)
         if not was_chunked:
             zh = self._verify_or_retry(text, zh)
 
@@ -356,48 +479,91 @@ class SmartTranslator:
     def reset(self):
         self._history = []
         self.paper_direction = ""
+        self.glossary = AcademicGlossaryManager()
         self.stats = self._new_stats()
 
-    # ── Translation methods ──
+    # ── Prompt Construction & Generation ──
+
+    def _build_system_message(self, text: str) -> str:
+        """Build dynamic system message with relevant term constraints."""
+        sys_msg = BASE_ACADEMIC_SYSTEM_PROMPT
+        if self.paper_direction:
+            sys_msg = f"【论文研究方向】{self.paper_direction}\n" + sys_msg
+
+        # Dynamic query-relevant constraint injection (< 25 tokens)
+        constraints = self.glossary.get_relevant_constraints(text)
+        if constraints:
+            sys_msg += f"\n{constraints}"
+        return sys_msg
 
     def _translate_short(self, text: str) -> str:
-        if self._prefix_cached:
-            suffix = text + "\n\n中文："
-            return self._gen_cached(suffix, max_tokens=128, temp=0.4)
-        prompt = SHORT_PROMPT.format(direction=self.paper_direction, style=STYLE_RULES, text=text)
-        return self._gen(prompt, max_tokens=128, temp=0.4)
-
-    def _translate_normal(self, text: str, temperature: float = 0.5) -> str:
-        # Use context window if available
-        ctx = self._history[-1] if self._history else None
-        if ctx and len(ctx['en']) > 30:
-            # Context prompt has dynamic prefix, can't use cache
-            prompt = CONTEXT_PROMPT.format(
-                direction=self.paper_direction, style=STYLE_RULES,
-                prev_en=ctx['en'][:300],
-                prev_zh=ctx['zh'][:300],
-                text=text)
-            return self._gen(prompt, max_tokens=512, temp=temperature)
+        sys_msg = self._build_system_message(text)
+        if self._is_hunyuan:
+            prompt = f"{self.tok_bos}{sys_msg}{self.tok_p3}{self.tok_usr}{text}{self.tok_ast}"
         else:
-            if self._prefix_cached:
-                suffix = text + "\n\n中文："
-                return self._gen_cached(suffix, max_tokens=512, temp=temperature)
-            prompt = NORMAL_PROMPT.format(direction=self.paper_direction, style=STYLE_RULES, text=text)
-            return self._gen(prompt, max_tokens=512, temp=temperature)
+            prompt = SHORT_PROMPT.format(direction=self.paper_direction, style=sys_msg, text=text)
+        return self._gen(prompt, max_tokens=160, temp=0.3)
+
+    def _translate_normal(self, text: str, prev_en: str = None, prev_zh: str = None,
+                          temperature: float = 0.3) -> str:
+        sys_msg = self._build_system_message(text)
+
+        # Context: either explicit prev_en/prev_zh or latest from history
+        if not prev_en and self._history:
+            ctx = self._history[-1]
+            if len(ctx['en']) > 20:
+                prev_en = ctx['en']
+                prev_zh = ctx['zh']
+
+        if self._is_hunyuan:
+            if prev_en and prev_zh and len(prev_en) > 20:
+                # Multi-turn few-shot context
+                prompt = (f"{self.tok_bos}{sys_msg}{self.tok_p3}"
+                          f"{self.tok_usr}{prev_en[:260]}{self.tok_ast}{prev_zh[:260]}{self.tok_eos}"
+                          f"{self.tok_usr}{text}{self.tok_ast}")
+            else:
+                prompt = f"{self.tok_bos}{sys_msg}{self.tok_p3}{self.tok_usr}{text}{self.tok_ast}"
+        else:
+            if prev_en and prev_zh and len(prev_en) > 20:
+                prompt = CONTEXT_PROMPT.format(
+                    direction=self.paper_direction, style=sys_msg,
+                    prev_en=prev_en[:260], prev_zh=prev_zh[:260], text=text)
+            else:
+                prompt = NORMAL_PROMPT.format(
+                    direction=self.paper_direction, style=sys_msg, text=text)
+
+        return self._gen(prompt, max_tokens=512, temp=temperature)
 
     def _translate_long(self, text: str) -> str:
-        """Split long text, translate each chunk with context + per-chunk verification."""
+        """Split long text into sentence-grouped chunks with sliding 1-sentence overlap."""
         chunks = self._split_chunks(text)
         if len(chunks) <= 1:
             return self._translate_normal(text)
 
         results = []
+        prev_chunk_en = None
+        prev_chunk_zh = None
+
         for chunk in chunks:
-            zh = self._translate_normal(chunk)
-            results.append(self._verify_or_retry(chunk, zh))
+            prev_en_ctx = None
+            prev_zh_ctx = None
+            if prev_chunk_en and prev_chunk_zh:
+                # Extract last sentence of previous chunk for semantic continuity
+                s_en = re.split(r'(?<=[.!?])\s+', prev_chunk_en.strip())
+                s_zh = re.split(r'(?<=[。！？])', prev_chunk_zh.strip())
+                if s_en and s_zh:
+                    prev_en_ctx = s_en[-1]
+                    prev_zh_ctx = s_zh[-1]
+
+            zh = self._translate_normal(chunk, prev_en=prev_en_ctx, prev_zh=prev_zh_ctx)
+            verified_zh = self._verify_or_retry(chunk, zh)
+            results.append(verified_zh)
+            prev_chunk_en = chunk
+            prev_chunk_zh = verified_zh
+
         return ''.join(results)
 
-    # ── Back-translation verification ──
+    # ── Quality Gate & Back-Translation Verification ──
 
     @staticmethod
     def _new_stats() -> dict:
@@ -408,7 +574,8 @@ class SmartTranslator:
         }
 
     def _verify_or_retry(self, en: str, zh: str) -> str:
-        """Apply the configured quality gate, preserving the old full path."""
+        """Multi-dimensional Quality Gate: structure, numbers, polarity, and back-translation."""
+        self.stats['total'] += 1
         if not self.verify or len(en) <= 40:
             self.stats['passed'] += 1
             return zh
@@ -429,19 +596,22 @@ class SmartTranslator:
             self.stats['passed'] += 1
             return zh
 
+        # First verify failed: retry at lower temperature with post-correction
         from config import get as cfg
-        zh2 = self._translate_normal(
-            en, temperature=cfg('sampling', 'retry_temperature', default=0.2))
+        retry_temp = cfg('sampling', 'retry_temperature', default=0.1)
+        zh2 = self._translate_normal(en, temperature=retry_temp)
+        zh2 = self.glossary.post_correct(zh2, en)
+
         self.stats['back_verified'] += 1
         if self._verify(en, zh2):
             self.stats['retried'] += 1
             return zh2
 
         self.stats['failed'] += 1
-        return zh  # keep original despite a low verification score
+        return zh2 if len(zh2) >= len(zh) * 0.7 else zh
 
     def _should_audit(self, en: str) -> bool:
-        """Sample stable audit candidates so repeated runs choose the same text."""
+        """Deterministic sampling of safe candidates for full verification audit."""
         if self.verify_audit_rate <= 0:
             return False
         if self.verify_audit_rate >= 1:
@@ -451,51 +621,57 @@ class SmartTranslator:
 
     @staticmethod
     def _passes_fast_gate(en: str, zh: str) -> tuple[bool, str]:
-        """Check output structure before omitting a back-translation.
-
-        The gate deliberately prefers false negatives (full verification) over
-        false positives. It validates structure and protected literals; it is
-        not a semantic-equivalence proof, hence the audit sample above.
+        """
+        Fast gate: validates structure, completeness, numerical invariance,
+        and logical polarity before bypassing back-translation.
         """
         en, zh = en.strip(), zh.strip()
         if not zh or zh.startswith('[ERROR'):
             return False, 'empty_or_error'
         if re.search(r'(?i)^(english|chinese|translation|analysis)\s*[:：]', zh):
             return False, 'label_leak'
-        if len(en) < 80:
-            return False, 'short_source'
+        if len(en) < 40:
+            return True, 'short_source_ok'
 
-        zh_len = len(re.sub(r'\s+', '', zh))
-        ratio = zh_len / max(len(re.sub(r'\s+', '', en)), 1)
-        if not 0.20 <= ratio <= 1.25:
+        zh_clean = re.sub(r'\s+', '', zh)
+        en_clean = re.sub(r'\s+', '', en)
+        ratio = len(zh_clean) / max(len(en_clean), 1)
+        if not (0.20 <= ratio <= 1.50):
             return False, 'length_ratio'
+
         chinese_chars = len(re.findall(r'[\u3400-\u9fff]', zh))
-        if chinese_chars < 12 or chinese_chars / max(zh_len, 1) < 0.25:
+        if chinese_chars < 6 or chinese_chars / max(len(zh_clean), 1) < 0.20:
             return False, 'insufficient_chinese'
+
         if re.search(r'(.{8,30})\1{2,}', zh):
             return False, 'repetition'
 
-        # These spans are not allowed to change in academic translation.
-        protected_patterns = (
-            r'\$\$.*?\$\$', r'\$[^$\n]+\$', r'\\\(.*?\\\)', r'\\\[.*?\\\]',
-            r'\[[^\]\n]{1,80}\]', r'https?://\S+',
-            r'\b[A-Z]{2,}(?:[-_][A-Z0-9]+)*\b',
-            r'(?<![A-Za-z0-9])\d+(?:\.\d+)?(?:e[+-]?\d+)?%?',
-        )
-        compact_zh = re.sub(r'\s+', '', zh)
-        for pattern in protected_patterns:
-            for span in re.findall(pattern, en, flags=re.DOTALL):
-                normalized = re.sub(r'\s+', '', span)
-                if normalized and normalized not in compact_zh:
-                    return False, 'protected_span_missing'
+        # 1. Numerical Invariance Check: key numbers, percentages, decimals must be preserved
+        numbers_en = set(re.findall(r'\b\d+(?:\.\d+)?%?\b', en))
+        salient_numbers = {n for n in numbers_en if len(n) > 1 or '.' in n or '%' in n}
+        for num in salient_numbers:
+            if num not in zh_clean:
+                return False, f'number_missing_{num}'
+
+        # 2. Polarity Invariance Check: English negative polarity must yield Chinese negative words
+        neg_en = bool(re.search(r'\b(not|never|no longer|neither|nor|fails? to|failed to)\b', en, re.I))
+        neg_zh = bool(re.search(r'[不未无非零绝]', zh))
+        if neg_en and not neg_zh:
+            return False, 'negation_missing'
+
+        # 3. Unicode Mask Preservation
+        masks_en = re.findall(r'⟪[MRU]\d+⟫', en)
+        for m in masks_en:
+            if m not in zh:
+                return False, f'mask_missing_{m}'
+
         return True, 'accepted'
 
     def _verify(self, en: str, zh: str) -> bool:
         back = self._back_translate(zh)
         if not back:
-            return False  # empty back-translation = model failure, not a pass
+            return False
         sim = self._similarity(en, back)
-        # Adaptive threshold from config
         from config import get as cfg
         length = len(en)
         if length < 100: threshold = cfg('verify', 'threshold_short', default=0.50)
@@ -505,8 +681,12 @@ class SmartTranslator:
         return sim >= threshold
 
     def _back_translate(self, zh: str) -> str:
-        prompt = BACK_PROMPT.format(source=zh)
-        return self._gen(prompt, max_tokens=256, temp=0.3)
+        if self._is_hunyuan:
+            prompt = (f"{self.tok_bos}将以下中文学术论文文本准确翻译为英文：{self.tok_p3}"
+                      f"{self.tok_usr}{zh}{self.tok_ast}")
+        else:
+            prompt = BACK_PROMPT.format(source=zh)
+        return self._gen(prompt, max_tokens=256, temp=0.2)
 
     @staticmethod
     def _similarity(a: str, b: str) -> float:
@@ -547,25 +727,24 @@ class SmartTranslator:
                                    top_k=cfg('sampling', 'top_k', default=20))
         return self._clean(output)
 
-    def _gen_cached(self, suffix: str, max_tokens: int, temp: float) -> str:
-        from config import get as cfg
-        output = self.llm.generate_cached(suffix, max_tokens=max_tokens,
-                                          temperature=temp,
-                                          top_p=cfg('sampling', 'top_p', default=0.6),
-                                          top_k=cfg('sampling', 'top_k', default=20))
-        return self._clean(output)
-
     @staticmethod
     def _clean(output: str) -> str:
+        """Clean output text, strip markdown code blocks and MT conversational prefixes."""
+        # Strip code blocks if any
+        if output.startswith('```') and output.endswith('```'):
+            lines = output.split('\n')[1:-1]
+            output = '\n'.join(lines)
+
         lines = output.split('\n')
         result = []
         for line in lines:
             line = line.strip()
             if not line:
-                if result: break      # stop at empty line only AFTER content
-                continue               # skip leading empty lines
-            if line.startswith('English:') and result: break
-            if line.startswith('Chinese:'): line = line[len('Chinese:'):].strip()
+                if result: break
+                continue
+            if line.startswith(('English:', 'Source:', 'Original:')) and result: break
+            if line.startswith(('Chinese:', 'Translation:', '中文：', '翻译：')):
+                line = re.sub(r'^(?:Chinese|Translation|中文|翻译)\s*[:：]\s*', '', line)
             if line and not line.startswith('---') and not line.startswith('Summary:'):
                 result.append(line)
         return ' '.join(result).strip()

@@ -13,12 +13,24 @@ import operator
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.add_dll_directory(os.getcwd())
-os.add_dll_directory(r'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin')
+cuda_path = os.environ.get('CUDA_PATH')
+if cuda_path:
+    bin_dir = os.path.join(cuda_path, 'bin')
+    if os.path.isdir(bin_dir):
+        try: os.add_dll_directory(bin_dir)
+        except OSError: pass
+default_cuda = r'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin'
+if os.path.isdir(default_cuda):
+    try: os.add_dll_directory(default_cuda)
+    except OSError: pass
 
-from langgraph.graph import StateGraph, END
+try:
+    from langgraph.graph import StateGraph, END
+except ImportError:
+    StateGraph, END = None, None
 
 # ── Module-level model singletons (shared across LangGraph nodes) ──
-_translator = None   # ContextWindowTranslator, loaded once
+_translator = None   # SmartTranslator, loaded once
 _ocr_engine = None    # OCREngine, loaded/unloaded per page
 
 
@@ -64,11 +76,11 @@ class TranslationState(TypedDict, total=False):
 def _load_translator(model_path: str):
     global _translator
     if _translator is None:
-        from infer.translate_v2 import ContextWindowTranslator
-        _translator = ContextWindowTranslator(
+        from infer.translate_v2 import SmartTranslator
+        _translator = SmartTranslator(
             model_path=model_path, n_gpu_layers=99,
             verify=True)
-        _translator.reset_context()
+        _translator.reset()
     return _translator
 
 

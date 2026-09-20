@@ -19,7 +19,20 @@ _DLL_DIR = os.path.dirname(os.path.abspath(__file__))
 _ROOT_DIR = os.path.dirname(_DLL_DIR)
 
 os.add_dll_directory(_ROOT_DIR)
-os.add_dll_directory(r'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin')
+cuda_path = os.environ.get('CUDA_PATH')
+if cuda_path:
+    bin_dir = os.path.join(cuda_path, 'bin')
+    if os.path.isdir(bin_dir):
+        try:
+            os.add_dll_directory(bin_dir)
+        except OSError:
+            pass
+default_cuda = r'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin'
+if os.path.isdir(default_cuda):
+    try:
+        os.add_dll_directory(default_cuda)
+    except OSError:
+        pass
 
 _lib = ctypes.CDLL(os.path.join(_ROOT_DIR, 'llama.dll'))
 
@@ -250,6 +263,9 @@ _lib.llama_sampler_init_temp.argtypes = [c_float]
 _lib.llama_sampler_init_dist.restype = llama_sampler_p
 _lib.llama_sampler_init_dist.argtypes = [c_uint32]
 
+_lib.llama_sampler_init_penalties.restype = llama_sampler_p
+_lib.llama_sampler_init_penalties.argtypes = [c_int32, c_float, c_float, c_float]
+
 _lib.llama_sampler_sample.restype = llama_token
 _lib.llama_sampler_sample.argtypes = [llama_sampler_p, llama_context_p, c_int32]
 
@@ -370,6 +386,9 @@ class LlamaModel:
 
         self.n_ctx = n_ctx
         self._chat_template = self._get_meta("tokenizer.chat_template")
+        self._prefix_tokens: list[int] = []
+        self._prefix_len: int = 0
+        self._prefix_in_kv: bool = False
         kv_name = "Q8_0" if kv_type == 8 else "F16" if kv_type == 1 else f"type{kv_type}"
         print(f"Model loaded: n_ctx={n_ctx}, n_gpu_layers={n_gpu_layers}, kv_cache={kv_name}")
 
@@ -394,13 +413,16 @@ class LlamaModel:
         return list(tokens[:n])
 
     def detokenize(self, tokens: list[int]) -> str:
-        """Convert token IDs back to text, handling GPT-2 byte-level encoding."""
-        parts = []
+        """Convert token IDs back to text, handling GPT-2 byte-level encoding and multi-byte UTF-8 boundaries."""
+        parts_bytes = []
         for t in tokens:
             s = _lib.llama_vocab_get_text(self.vocab, t)
             if s:
-                parts.append(s.decode('utf-8', errors='replace'))
-        text = ''.join(parts)
+                parts_bytes.append(s)
+        if not parts_bytes:
+            return ""
+        raw_bytes = b"".join(parts_bytes)
+        text = raw_bytes.decode('utf-8', errors='replace')
         # Apply GPT-2 byte-level decoding (convert unicode escapes back to bytes)
         return _gpt2_byte_decode(text)
 
@@ -440,6 +462,7 @@ class LlamaModel:
         # Clear KV cache via memory
         mem = _lib.llama_get_memory(self.ctx)
         _lib.llama_memory_clear(mem, True)
+        self._prefix_in_kv = False
 
         # Main generation loop
         generated_tokens = []
@@ -486,8 +509,22 @@ class LlamaModel:
         return output
 
     # ── Prefix Caching ──────────────────────────────────────────
-    _prefix_tokens: list[int] = []   # cached prefix token IDs
-    _prefix_len: int = 0             # number of tokens in cached prefix
+    def _restore_prefix(self):
+        """Re-decode the cached prefix tokens into the KV cache."""
+        if not self._prefix_tokens:
+            return
+        mem = _lib.llama_get_memory(self.ctx)
+        _lib.llama_memory_clear(mem, True)
+        pos = 0
+        while pos < len(self._prefix_tokens):
+            batch_size = min(512, len(self._prefix_tokens) - pos)
+            batch_tokens = (llama_token * batch_size)()
+            for i in range(batch_size):
+                batch_tokens[i] = self._prefix_tokens[pos + i]
+            batch = _lib.llama_batch_get_one(batch_tokens, batch_size)
+            _lib.llama_decode(self.ctx, batch)
+            pos += batch_size
+        self._prefix_in_kv = True
 
     def cache_prefix(self, prefix: str):
         """
@@ -495,22 +532,9 @@ class LlamaModel:
         Call once with the static part of your prompt template.
         """
         tokens = self.tokenize(prefix, add_bos=True, special=True)
-        mem = _lib.llama_get_memory(self.ctx)
-        _lib.llama_memory_clear(mem, True)
-
-        # Process prefix tokens in batches
-        pos = 0
-        while pos < len(tokens):
-            batch_size = min(512, len(tokens) - pos)
-            batch_tokens = (llama_token * batch_size)()
-            for i in range(batch_size):
-                batch_tokens[i] = tokens[pos + i]
-            batch = _lib.llama_batch_get_one(batch_tokens, batch_size)
-            _lib.llama_decode(self.ctx, batch)
-            pos += batch_size
-
         self._prefix_tokens = tokens
         self._prefix_len = len(tokens)
+        self._restore_prefix()
         print(f"Prefix cached: {self._prefix_len} tokens")
 
     def generate_cached(self, suffix: str, max_tokens: int = 512,
@@ -526,9 +550,12 @@ class LlamaModel:
         # Tokenize suffix only (no BOS — prefix already has it)
         suffix_tokens = self.tokenize(suffix, add_bos=False, special=True)
 
-        # Remove any leftover suffix from previous call, keep prefix
         mem = _lib.llama_get_memory(self.ctx)
-        _lib.llama_memory_seq_rm(mem, -1, self._prefix_len, -1)
+        if not self._prefix_in_kv:
+            self._restore_prefix()
+        else:
+            # Remove any leftover suffix from previous call, keep prefix
+            _lib.llama_memory_seq_rm(mem, -1, self._prefix_len, -1)
 
         # Build sampler chain
         sparams = _lib.llama_sampler_chain_default_params()

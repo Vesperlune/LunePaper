@@ -12,7 +12,20 @@ _DLL_DIR = os.path.dirname(os.path.abspath(__file__))
 _ROOT_DIR = os.path.dirname(_DLL_DIR)
 
 os.add_dll_directory(_ROOT_DIR)
-os.add_dll_directory(r'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin')
+cuda_path = os.environ.get('CUDA_PATH')
+if cuda_path:
+    bin_dir = os.path.join(cuda_path, 'bin')
+    if os.path.isdir(bin_dir):
+        try:
+            os.add_dll_directory(bin_dir)
+        except OSError:
+            pass
+default_cuda = r'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin'
+if os.path.isdir(default_cuda):
+    try:
+        os.add_dll_directory(default_cuda)
+    except OSError:
+        pass
 
 _mtmd = ctypes.CDLL(os.path.join(_ROOT_DIR, 'mtmd.dll'))
 
