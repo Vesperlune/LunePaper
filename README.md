@@ -41,11 +41,10 @@
 
 ```
   PDF 上传  ──►  双底座 OCR 识别  ──►  领域约束翻译  ──►  双语对照流式阅读  ──►  离线 HTML 导出
-     📄                 🔍                     🌐                    📖                     📑
 ```
 
 <details>
-<summary><b>📐 系统架构</b></summary>
+<summary><b>系统架构与工作流</b></summary>
 <br>
 
 ```
@@ -75,16 +74,36 @@
 
 ---
 
-## ✨ 核心特性
+## 核心特性
 
 | 特性分类 | 核心亮点 | 技术说明 |
 |:---|:---|:---|
-| **双底座 OCR 引擎** | **按需动态切换** | • **Unlimited-OCR**：3B MoE (64×550M)<br>• **OvisOCR2**：0.8B Dense (752M)，显存仅需 **1.7GB**， |
-| **全量公式渲染** | **KaTeX 深度整合** | 支持行内公式 `$..$`、独立块级公式 `$$..$$` 与多行对齐 `\begin{aligned}`；内置 OCR 分词空隙与下标智能清洗器（`clean_latex_math`），自动修复 OCR 导致的排版异常。 |
-| **离线 HTML 导出** | **100% 自包含交付** | 导出的 HTML 文件直接**全量内嵌 KaTeX 引擎与样式**，无外部 CDN 依赖，断网环境下打开即显，图表自动内嵌 base64，永久安全存档。 |
-| **领域术语约束** | **学术级专名一致性** | 基于论文研究方向提取动态上下文，注入领域学术术语库（Transformer、CV、生物医疗等），杜绝专有名词误译，提升学术表达严谨性。 |
+| **双底座 OCR 引擎** | **按需动态切换** | • **Unlimited-OCR**：3B MoE (64×550M)<br>• **OvisOCR2**：0.8B Dense (752M)，显存仅需 **1.7GB**。 |
+| **结构化论文速读** | **四维核心提炼** | 基于大模型自动从论文摘要与引言中提炼背景痛点、创新方法、实验基准与学术价值，30 秒速览论文全貌。 |
+| **学者与机构对齐** | **元数据智能识别** | 自动提取学者阵容、多重学术机构、通讯邮箱与特殊符号脚注，以扁平胶囊整齐排布。 |
+| **全量公式与变量词典**| **KaTeX + 符号字典** | 支持行内公式 `$..$` 与独立块级公式 `$$..$$`；独家提供变量词典，智能解析公式关键符号并支持全篇符号字典。 |
+| **文献引用即时溯源** | **悬浮即显卡片** | 正文引用角标悬浮直读文献详情，提供 Google 学术、arXiv 快捷跳转及原文原位定位。 |
+| **算法代码拟物排版** | **语法深度高亮** | 现代拟物风格代码视窗，支持 PyTorch 等主流框架深度高亮、精准行号对齐与一键复制代码。 |
+| **领域术语约束** | **学术级专名一致性** | 基于论文研究方向提取动态上下文，注入领域学术术语库（Transformer、CV、生物医疗等），杜绝专有名词误译。 |
+| **离线 HTML 导出** | **100% 自包含交付** | 导出的 HTML 文件直接**全量内嵌 KaTeX 引擎与样式**，无外部 CDN 依赖，断网即显，图表自动内嵌 base64。 |
 | **实时流式推送** | **零等待对照阅读** | 逐页 OCR → 逐块分批翻译 → WebSocket 纳秒级推送到前端，翻译与阅读同步进行。 |
 | **PDF 双栏对照** | **版面原位对照** | 一键开启右侧原版高保真 PDF 视口，缩略图、原页、译文三位一体实时导航联动。 |
+
+<br>
+
+---
+
+## 学术精读与现代化交互排版
+
+月读不仅提供严谨准确的学术级双语翻译，更在排版、公式解析与文献溯源等精读体验上进行了深度创新：
+
+| 论文结构化速读 (Paper TL;DR) | 学者团队与学术机构对齐 |
+| :---: | :---: |
+| <img src="assets/1 (4).png" width="100%" style="border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,0.06);" /><br><sub>四维提炼研究背景、核心创新、实验指标与学术价值</sub> | <img src="assets/1 (5).png" width="100%" style="border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,0.06);" /><br><sub>智能识别作者阵容、多重机构与特殊符号脚注元数据</sub> |
+| **公式深度解析与变量词典** | **文献引用即时悬浮与智能溯源** |
+| <img src="assets/1 (2).png" width="100%" style="border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,0.06);" /><br><sub>高保真 LaTeX 公式渲染、关键变量释义与全篇符号字典</sub> | <img src="assets/1 (3).png" width="100%" style="border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,0.06);" /><br><sub>引用角标悬浮直读文献详情，直达 Google 学术与 arXiv</sub> |
+| **算法实现与代码高亮排版** | **原生独立桌面应用视窗** |
+| <img src="assets/1 (1).png" width="100%" style="border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,0.06);" /><br><sub>现代拟物风格代码视窗，支持 PyTorch 语法高亮与一键复制</sub> | <img src="assets/showcase.png" width="100%" style="border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,0.06);" /><br><sub>原生 WebView2 独立视窗，无地址栏干扰，全模态沉浸精读</sub> |
 
 <br>
 
@@ -214,6 +233,12 @@ cd ..
 
 ### Step 5 · 启动服务
 
+**方式 A · 一键桌面客户端（推荐）**
+
+直接双击运行项目根目录下的 `start.bat`，系统将自动检测环境、托管前后端服务并弹出无边框干扰的原生独立桌面窗口。
+
+**方式 B · 终端独立启动**
+
 ```bash
 # 终端 1：启动 FastAPI 后端服务 (端口 7860)
 python backend/main.py
@@ -229,7 +254,7 @@ npm run dev
 
 ---
 
-## ⚙️ 配置文件说明 (`config.yaml`)
+## 配置文件说明 (`config.yaml`)
 
 ```yaml
 # ── 模型与 OCR 底座配置 ──
@@ -272,13 +297,16 @@ translation:
 
 ---
 
-## 📂 项目结构
+## 项目结构
 
 ```
 LunePaper/
+├── desktop_app.py            # 原生桌面客户端主控 (基于 PyWebView 与 WebView2)
+├── start.bat                 # 极简一键启动批处理 (纯 ASCII 编码)
+│
 ├── backend/                  # FastAPI 异步服务端
 │   ├── main.py               #   服务主入口与 CORS 中间件配置
-│   ├── routes.py             #   REST 路由 (上传/离线HTML生成/模型查询)
+│   ├── routes.py             #   REST 路由 (上传/离线HTML生成/模型查询/历史知识库)
 │   ├── ws.py                 #   WebSocket 实时流式传输信道
 │   ├── worker.py             #   翻译管道编排调度与版面分析
 │   └── task_manager.py       #   任务状态与缓存生命周期管理
@@ -293,14 +321,14 @@ LunePaper/
 │
 ├── frontend/                 # 现代化 React 前端应用
 │   ├── src/
-│   │   ├── App.tsx           #   主视图组件 (吸顶滑轨/双栏对照/状态机)
+│   │   ├── App.tsx           #   主视图组件 (Portal 首页/双工具集成/状态机)
 │   │   ├── api.ts            #   REST 与 WebSocket 统一交互接口
 │   │   ├── types.ts          #   前端 TypeScript 强类型定义
-│   │   └── index.css         #   现代表格与排版微拟物设计系统
+│   │   └── components/       #   知识库工作区与 Markdown 编辑器组件
 │   ├── package.json
 │   └── vite.config.ts
 │
-├── assets/                   # 项目展示动画 (example.gif)、视觉素材与图标
+├── assets/                   # 项目展示动画 (example.gif)、视觉素材、图标与功能截图
 ├── config.yaml               # 全局统一业务与模型配置文件
 ├── config.py                 # 动态配置与参数加载器
 └── requirements.txt          # Python 环境依赖清单
