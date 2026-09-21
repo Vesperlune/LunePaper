@@ -68,6 +68,146 @@ BACK_PROMPT = """中文：该模型取得了当前最优结果。
 
 
 # ═══════════════════════════════════════════════
+# Paper TL;DR Parser
+# ═══════════════════════════════════════════════
+
+def parse_tldr_text(text: str) -> dict:
+    """Parse structured TL;DR response into clean key-value pairs."""
+    result = {
+        "background": "",
+        "method": "",
+        "metrics": "",
+        "conclusion": "",
+    }
+    bg_m = re.search(r'【?(?:研究背景与痛点|研究背景|核心痛点|痛点)】?[：:]?\s*([\s\S]+?)(?=【|$)', text)
+    if bg_m:
+        result["background"] = bg_m.group(1).strip()
+
+    meth_m = re.search(r'【?(?:核心创新与方案|核心创新|核心方法|方法与方案|方法|创新)】?[：:]?\s*([\s\S]+?)(?=【|$)', text)
+    if meth_m:
+        result["method"] = meth_m.group(1).strip()
+
+    metr_m = re.search(r'【?(?:实验性能与指标|关键指标|性能指标|指标|实验结论)】?[：:]?\s*([\s\S]+?)(?=【|$)', text)
+    if metr_m:
+        result["metrics"] = metr_m.group(1).strip()
+
+    conc_m = re.search(r'【?(?:工作价值与结论|现实意义|学术贡献|价值与结论|结论)】?[：:]?\s*([\s\S]+?)(?=【|$)', text)
+    if conc_m:
+        result["conclusion"] = conc_m.group(1).strip()
+
+    # Fallback if specific brackets not parsed
+    if not any(result.values()):
+        lines = [line.strip() for line in text.split('\n') if line.strip()]
+        for line in lines:
+            if any(k in line for k in ['背景', '痛点']) and not result['background']:
+                result['background'] = re.sub(r'^.*?[:：]', '', line).strip()
+            elif any(k in line for k in ['创新', '方法', '方案']) and not result['method']:
+                result['method'] = re.sub(r'^.*?[:：]', '', line).strip()
+            elif any(k in line for k in ['指标', '实验', '性能']) and not result['metrics']:
+                result['metrics'] = re.sub(r'^.*?[:：]', '', line).strip()
+            elif any(k in line for k in ['结论', '价值', '意义']) and not result['conclusion']:
+                result['conclusion'] = re.sub(r'^.*?[:：]', '', line).strip()
+
+    return result
+
+
+# ═══════════════════════════════════════════════
+# Code and pseudocode detection
+# ═══════════════════════════════════════════════
+
+def is_code_block_text(text: str, block_type: str = 'text') -> bool:
+    """
+    Detect source code, JSON structures, prompt templates, pseudocode, and algorithm blocks.
+    Protects code and structured specs from LLM translation into hallucinated Chinese tokens.
+    """
+    if not text or len(text.strip()) < 8:
+        return False
+    if block_type in ('algorithm', 'code'):
+        return True
+    t = text.strip()
+
+    # 1. JSON / Dictionary structure detection
+    if re.search(r'^\s*(?:\{\s*"?|\},\s*\{|\[\s*\{|\}\s*\])', t):
+        return True
+    if re.search(r'^\s*"(?:name|type|description|parameters|properties|tool_description|api_list|url|default|Query|related_apis|api_name)"\s*:\s*', t, re.M):
+        return True
+    json_pair_count = len(re.findall(r'"[a-zA-Z0-9_.-]+"\s*:\s*(?:"[^"]*"|\d+|true|false|null|\[|\{)', t))
+    if json_pair_count >= 2:
+        return True
+
+    # 2. Prompts, Agent Templates, Execution traces
+    prompt_headers = r'^\s*(?:system_prompt|user_prompt|assistant_prompt|diversity_user_prompt|task_description|Finish_function_description|thought|action|action\s+input|observation)\s*:'
+    if re.search(prompt_headers, t, re.I | re.M):
+        return True
+    if re.search(r'\{[a-zA-Z0-9_]*(?:task|candidate|description|instruction|query|input|output|prompt|state)[a-zA-Z0-9_]*\}', t):
+        return True
+
+    # 3. Direct match on standard code / pseudocode headers
+    code_start_patterns = [
+        r'^\s*(?:def|function)\s+[a-zA-Z0-9_]+\s*\(',
+        r'^\s*class\s+[a-zA-Z0-9_]+(?:\([^)]*\))?\s*:',
+        r'^\s*from\s+[a-zA-Z0-9_.]+\s+import\s+[a-zA-Z0-9_*]',
+        r'^\s*import\s+[a-zA-Z0-9_.]+(?:\s+as\s+[a-zA-Z0-9_]+)?\s*$',
+        r'^\s*(?:procedure|algorithm)\s+[a-zA-Z0-9_]+\s*\(',
+        r'^\s*Algorithm\s+\d+\b',
+        r'^\s*(?:void|int|float|double|bool|const|let|var)\s+[a-zA-Z0-9_]+\s*=',
+    ]
+    for cp in code_start_patterns:
+        if re.search(cp, t, re.I | re.M):
+            return True
+
+    # 4. Pseudocode Input/Output/Require/Ensure markers
+    if re.search(r'^\s*(?:Input|Output|Require|Ensure|Initialization|Parameters|State)\s*:\s*\S+', t, re.I | re.M):
+        return True
+
+    # 5. Algorithmic control flow - line oriented
+    algo_control = [
+        r'^\s*(?:for\s+each|foreach)\b[^\n]+?\bdo(?:\s*$|\s+)',
+        r'^\s*while\b[^\n]+?\bdo(?:\s*$|\s+)',
+        r'^\s*for\b[^\n]+?\bdo(?:\s*$|\s+)',
+        r'^\s*if\b[^\n]+?\bthen(?:\s*$|\s+)',
+        r'^\s*repeat\b',
+        r'^\s*until\b[^\n]+',
+        r'^\s*end\s+(?:while|for|if|procedure)\b',
+        r'^[a-zA-Z0-9_]\s*(?::=|←|\\leftarrow|\\Leftarrow)\s*',
+    ]
+    for pat in algo_control:
+        if re.search(pat, t, re.I | re.M):
+            return True
+
+    # 6. Count code syntax indicators
+    score = 0
+    code_keywords = [
+        r'\b(?:torch|nn|np|cuda|rearrange|masked_fill|new_zeros|zeros_like|cumsum|arange|triu|tril)\b',
+        r'^\s*for\s+\w+\s+in\s+range\b',
+        r'^\s*(?:if\s+|elif\s+|else:|return\s+|while\s+|lambda\s+)',
+        r'\[\s*:\s*,\s*:\s*,\s*[^\]]+\]',
+        r'\b(?:int|float|bool|str|torch\.Tensor|Optional\[)\b',
+        r'\b(?:argmax|argmin|softmax|append\(|pop\(|sort\(|split\()\b',
+    ]
+    for pat in code_keywords:
+        if re.search(pat, t, re.M):
+            score += 2
+
+    lines = [l.strip() for l in t.split('\n') if l.strip()]
+    code_lines = sum(
+        1 for l in lines
+        if l.endswith(':') or l.endswith(';') or l.endswith(',') or
+           ' = ' in l or ' += ' in l or ' @ ' in l or ' <- ' in l or ':=' in l or
+           re.match(r'^\s*"[a-zA-Z0-9_]+"\s*:', l)
+    )
+    if len(lines) > 2 and (code_lines / len(lines)) >= 0.4:
+        score += 3
+
+    symbols = re.findall(r'[=()\[\]{}@+\-*/<>:]+', t)
+    sym_len = sum(len(s) for s in symbols)
+    if len(t) > 0 and (sym_len / len(t)) > 0.12 and len(lines) >= 2:
+        score += 2
+
+    return score >= 3
+
+
+# ═══════════════════════════════════════════════
 # Pseudo-title detection
 # ═══════════════════════════════════════════════
 
@@ -309,7 +449,8 @@ class SmartTranslator:
 
         self.llm = LlamaModel(model_path, n_gpu_layers=n_gpu_layers,
                               n_ctx=cfg('translation', 'n_ctx', default=2048),
-                              n_threads=cfg('translation', 'n_threads', default=4))
+                              n_threads=cfg('translation', 'n_threads', default=4),
+                              flash_attn=cfg('translation', 'flash_attn', default=True))
         self.verify = verify
         self.chunk_size = chunk_size or cfg('translation', 'chunk_size', default=500)
         self.verify_strategy = (verify_strategy or cfg(
@@ -320,6 +461,10 @@ class SmartTranslator:
             cfg('translation', 'verify_audit_rate', default=0.10)
             if verify_audit_rate is None else verify_audit_rate)
         self.verify_audit_rate = min(max(float(self.verify_audit_rate), 0.0), 1.0)
+        self.use_prefix_caching = cfg('translation', 'prefix_caching', default=True)
+        self.static_prefix_cached = False
+        self.static_prefix = ""
+        self.default_temp = cfg('sampling', 'temperature', default=0.0)
 
         # Domain Glossary Manager
         self.glossary = AcademicGlossaryManager()
@@ -364,17 +509,41 @@ class SmartTranslator:
         else:
             prompt = DIRECTION_PROMPT.format(abstract=abstract_en[:1500])
 
-        output = self.llm.generate(prompt, max_tokens=64, temperature=0.3)
+        output = self.llm.generate(prompt, max_tokens=64, temperature=self.default_temp)
         direction = self._clean(output)
         if direction and 2 < len(direction) < 30:
             self.paper_direction = f"{domain_zh}·{direction}"
         else:
             self.paper_direction = f"{domain_zh}·学术论文翻译"
 
+        self.init_static_prefix()
         print(f"  [Direction] {self.paper_direction}")
         if self.glossary.paper_specific_terms:
             terms_preview = list(self.glossary.paper_specific_terms.keys())[:8]
             print(f"  [Dynamic Terms] Injected {len(self.glossary.paper_specific_terms)} novel terms: {terms_preview}")
+
+    def generate_paper_tldr(self, abstract_zh: str) -> dict:
+        """Extract structured 4-dimensional TL;DR from translated Chinese abstract."""
+        if not abstract_zh or len(abstract_zh.strip()) < 30:
+            return {}
+
+        prompt = (f"请根据以下中文摘要，提炼四项论文要点：\n"
+                  f"【研究背景与痛点】：\n"
+                  f"【核心创新与方案】：\n"
+                  f"【实验性能与指标】：\n"
+                  f"【工作价值与结论】：\n\n"
+                  f"摘要：\n{abstract_zh.strip()[:1200]}\n\n"
+                  f"提炼结果：\n【研究背景与痛点】：")
+
+        try:
+            output = self.llm.generate(prompt, max_tokens=350, temperature=0.0)
+            full_text = "【研究背景与痛点】：" + (output or "")
+            tldr = parse_tldr_text(full_text)
+            print(f"  [Paper TL;DR] Extracted: {list(k for k, v in tldr.items() if v)}")
+            return tldr
+        except Exception as e:
+            print(f"  [Paper TL;DR] Extraction failed: {e}")
+            return {}
 
     @staticmethod
     def _mask_entities(text: str) -> tuple[str, dict]:
@@ -441,6 +610,11 @@ class SmartTranslator:
             self.stats['skipped'] += 1
             return None
 
+        # Code / algorithm / pseudocode → skip translation (preserve original executable code)
+        if block_type in ('algorithm', 'code') or is_code_block_text(text):
+            self.stats['skipped'] += 1
+            return None
+
         # Mask math/refs/urls
         masked_text, masks = self._mask_entities(text)
         text_len = len(masked_text)
@@ -481,6 +655,19 @@ class SmartTranslator:
         self.paper_direction = ""
         self.glossary = AcademicGlossaryManager()
         self.stats = self._new_stats()
+        self.static_prefix_cached = False
+        self.static_prefix = ""
+
+    def init_static_prefix(self):
+        """Pre-tokenize and cache the invariant system prompt in KV cache."""
+        if not self.use_prefix_caching or not self._is_hunyuan:
+            return
+        sys_msg = BASE_ACADEMIC_SYSTEM_PROMPT
+        if self.paper_direction:
+            sys_msg = f"【论文研究方向】{self.paper_direction}\n" + sys_msg
+        self.static_prefix = f"{self.tok_bos}{sys_msg}"
+        self.llm.cache_prefix(self.static_prefix)
+        self.static_prefix_cached = True
 
     # ── Prompt Construction & Generation ──
 
@@ -496,17 +683,37 @@ class SmartTranslator:
             sys_msg += f"\n{constraints}"
         return sys_msg
 
+    def _gen_cached(self, suffix: str, max_tokens: int, temp: float = None) -> str:
+        from config import get as cfg
+        if not self.static_prefix_cached:
+            self.init_static_prefix()
+        t = self.default_temp if temp is None else temp
+        output = self.llm.generate_cached(
+            suffix,
+            max_tokens=max_tokens,
+            temperature=t,
+            top_p=cfg('sampling', 'top_p', default=0.6),
+            top_k=cfg('sampling', 'top_k', default=20)
+        )
+        return self._clean(output)
+
     def _translate_short(self, text: str) -> str:
+        if self._is_hunyuan and self.use_prefix_caching:
+            constraints = self.glossary.get_relevant_constraints(text)
+            sys_suffix = f"\n{constraints}{self.tok_p3}" if constraints else self.tok_p3
+            suffix = f"{sys_suffix}{self.tok_usr}{text}{self.tok_ast}"
+            return self._gen_cached(suffix, max_tokens=160, temp=self.default_temp)
+
         sys_msg = self._build_system_message(text)
         if self._is_hunyuan:
             prompt = f"{self.tok_bos}{sys_msg}{self.tok_p3}{self.tok_usr}{text}{self.tok_ast}"
         else:
             prompt = SHORT_PROMPT.format(direction=self.paper_direction, style=sys_msg, text=text)
-        return self._gen(prompt, max_tokens=160, temp=0.3)
+        return self._gen(prompt, max_tokens=160, temp=self.default_temp)
 
     def _translate_normal(self, text: str, prev_en: str = None, prev_zh: str = None,
-                          temperature: float = 0.3) -> str:
-        sys_msg = self._build_system_message(text)
+                          temperature: float = None) -> str:
+        temp = self.default_temp if temperature is None else temperature
 
         # Context: either explicit prev_en/prev_zh or latest from history
         if not prev_en and self._history:
@@ -515,6 +722,18 @@ class SmartTranslator:
                 prev_en = ctx['en']
                 prev_zh = ctx['zh']
 
+        if self._is_hunyuan and self.use_prefix_caching:
+            constraints = self.glossary.get_relevant_constraints(text)
+            sys_suffix = f"\n{constraints}{self.tok_p3}" if constraints else self.tok_p3
+            if prev_en and prev_zh and len(prev_en) > 20:
+                suffix = (f"{sys_suffix}"
+                          f"{self.tok_usr}{prev_en[:260]}{self.tok_ast}{prev_zh[:260]}{self.tok_eos}"
+                          f"{self.tok_usr}{text}{self.tok_ast}")
+            else:
+                suffix = f"{sys_suffix}{self.tok_usr}{text}{self.tok_ast}"
+            return self._gen_cached(suffix, max_tokens=512, temp=temp)
+
+        sys_msg = self._build_system_message(text)
         if self._is_hunyuan:
             if prev_en and prev_zh and len(prev_en) > 20:
                 # Multi-turn few-shot context
@@ -532,7 +751,7 @@ class SmartTranslator:
                 prompt = NORMAL_PROMPT.format(
                     direction=self.paper_direction, style=sys_msg, text=text)
 
-        return self._gen(prompt, max_tokens=512, temp=temperature)
+        return self._gen(prompt, max_tokens=512, temp=temp)
 
     def _translate_long(self, text: str) -> str:
         """Split long text into sentence-grouped chunks with sliding 1-sentence overlap."""
@@ -646,24 +865,42 @@ class SmartTranslator:
         if re.search(r'(.{8,30})\1{2,}', zh):
             return False, 'repetition'
 
-        # 1. Numerical Invariance Check: key numbers, percentages, decimals must be preserved
-        numbers_en = set(re.findall(r'\b\d+(?:\.\d+)?%?\b', en))
-        salient_numbers = {n for n in numbers_en if len(n) > 1 or '.' in n or '%' in n}
-        for num in salient_numbers:
-            if num not in zh_clean:
-                return False, f'number_missing_{num}'
-
-        # 2. Polarity Invariance Check: English negative polarity must yield Chinese negative words
-        neg_en = bool(re.search(r'\b(not|never|no longer|neither|nor|fails? to|failed to)\b', en, re.I))
-        neg_zh = bool(re.search(r'[不未无非零绝]', zh))
-        if neg_en and not neg_zh:
-            return False, 'negation_missing'
-
-        # 3. Unicode Mask Preservation
+        # 1. Formula & Entity Masks Check
         masks_en = re.findall(r'⟪[MRU]\d+⟫', en)
         for m in masks_en:
             if m not in zh:
                 return False, f'mask_missing_{m}'
+
+        # Remove formulas from text when checking plain text numbers (formulas are already checked by mask)
+        en_no_formula = re.sub(r'\$\$[\s\S]+?\$\$|\$[^\$\n]+?\$|\\\[[\s\S]+?\\\]|\\\([^\n]+?\\\)|⟪[MRU]\d+⟫', '', en)
+        zh_no_formula = re.sub(r'\$\$[\s\S]+?\$\$|\$[^\$\n]+?\$|\\\[[\s\S]+?\\\]|\\\([^\n]+?\\\)|⟪[MRU]\d+⟫', '', zh)
+
+        # 2. Number preservation with Chinese scale conversion (e.g. 4.5 million -> 450万, 36 million -> 3600万)
+        numbers_en = re.findall(r'(\d+(?:\.\d+)?)\s*(million|billion)?', en_no_formula, flags=re.I)
+        for num_str, scale in numbers_en:
+            if len(num_str) <= 1 and not scale and '.' not in num_str:
+                continue
+            if num_str in zh_no_formula:
+                continue
+            # Check Chinese conversion
+            val = float(num_str)
+            if scale and scale.lower() == 'million':
+                val_wan = val * 100
+                cand_int = f"{int(val_wan)}万"
+                cand_flt = f"{val_wan:.1f}万"
+                if cand_int in zh_no_formula or cand_flt in zh_no_formula or str(int(val_wan)) in zh_no_formula:
+                    continue
+            elif scale and scale.lower() == 'billion':
+                val_yi = val * 10
+                if f"{val_yi}亿" in zh_no_formula:
+                    continue
+            return False, f'number_missing_{num_str}'
+
+        # 3. Polarity Invariance Check
+        neg_en = bool(re.search(r'\b(not|never|no longer|neither|nor|fails? to|failed to)\b', en, re.I))
+        neg_zh = bool(re.search(r'[不未无非零绝]', zh))
+        if neg_en and not neg_zh:
+            return False, 'negation_missing'
 
         return True, 'accepted'
 
@@ -686,7 +923,7 @@ class SmartTranslator:
                       f"{self.tok_usr}{zh}{self.tok_ast}")
         else:
             prompt = BACK_PROMPT.format(source=zh)
-        return self._gen(prompt, max_tokens=256, temp=0.2)
+        return self._gen(prompt, max_tokens=256, temp=0.0)
 
     @staticmethod
     def _similarity(a: str, b: str) -> float:
@@ -719,10 +956,11 @@ class SmartTranslator:
         if cur: chunks.append(' '.join(cur))
         return chunks
 
-    def _gen(self, prompt: str, max_tokens: int, temp: float) -> str:
+    def _gen(self, prompt: str, max_tokens: int, temp: float = None) -> str:
         from config import get as cfg
+        t = self.default_temp if temp is None else temp
         output = self.llm.generate(prompt, max_tokens=max_tokens,
-                                   temperature=temp,
+                                   temperature=t,
                                    top_p=cfg('sampling', 'top_p', default=0.6),
                                    top_k=cfg('sampling', 'top_k', default=20))
         return self._clean(output)
