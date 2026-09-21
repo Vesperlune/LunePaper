@@ -16,9 +16,10 @@ from typing import List, Dict, Any
 
 
 def clean_latex_math(text: str) -> str:
-    """Fix common Ovis tokenization spacing artifacts in LaTeX equations."""
+    """Fix common Ovis tokenization spacing artifacts in LaTeX equations and run universal syntax sanitizer."""
     if not text:
         return text
+    from infer.math_sanitizer import sanitize_latex_math
     text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
     # Standard trigonometric / math functions with spaced chars
     text = re.sub(r'\bs\s+i\s+n\b', r'\\sin', text)
@@ -36,17 +37,14 @@ def clean_latex_math(text: str) -> str:
     text = re.sub(r'\bl\s+r\s+a\s+t\s+e\b', 'lrate', text)
     text = re.sub(r'\bs\s+t\s+e\s+p\b', 'step', text)
     text = re.sub(r'\bw\s+a\s+r\s+m\s+u\s+p\b', 'warmup', text)
-    # Fix escaped underscores followed by spaces, e.g. step\_{n} u m -> step_{\mathrm{num}}
     text = re.sub(r'\\_\{n\}\s*u\s*m\b', r'_{\\mathrm{num}}', text)
     text = re.sub(r'\\_\{s\}\s*t\s*e\s*p\s*s\b', r'_{\\mathrm{steps}}', text)
-    # Fix subscript grouping without braces: _\mathrm{foo} -> _{\mathrm{foo}}
     text = re.sub(r'_\\mathrm\{([^{}]+)\}', r'_{\\mathrm{\1}}', text)
     text = re.sub(r'_\\text\{([^{}]+)\}', r'_{\\text{\1}}', text)
-    # Fix spaced decimals: -0. 5 -> -0.5, 88. 3 -> 88.3
     text = re.sub(r'(\d+)\.\s+(\d+)', r'\1.\2', text)
     text = re.sub(r'\\\\\s*where\b', r'\\\\ \\text{where }', text)
     text = re.sub(r'\.\s*\.\s*\.', r'\\dots', text)
-    return text
+    return sanitize_latex_math(text)
 
 
 def parse_ovis_markdown(raw_text: str) -> List[Dict[str, Any]]:
