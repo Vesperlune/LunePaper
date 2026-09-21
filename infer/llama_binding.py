@@ -353,7 +353,8 @@ class LlamaModel:
 
     def __init__(self, model_path: str, n_gpu_layers: int = 99,
                  n_ctx: int = 4096, n_threads: int = 4,
-                 kv_type: int = 1):  # 1 = GGML_TYPE_F16 (默认), 8 = GGML_TYPE_Q8_0
+                 kv_type: int = 1, flash_attn: bool = True,
+                 n_batch: int = 1024):  # 1 = GGML_TYPE_F16 (默认), 8 = GGML_TYPE_Q8_0
         self.model_path = model_path.encode('utf-8')
 
         # Load model
@@ -372,13 +373,13 @@ class LlamaModel:
         cparams.n_ctx = n_ctx
         cparams.n_threads = n_threads
         cparams.n_threads_batch = n_threads
-        cparams.n_batch = 512
-        cparams.n_ubatch = 512
+        cparams.n_batch = n_batch
+        cparams.n_ubatch = n_batch
         cparams.no_perf = True
         # KV cache 量化：type_k/type_v 设为 Q8_0 (8) 可减少 47% 显存、提速 ~8%
         cparams.type_k = kv_type
         cparams.type_v = kv_type
-        if kv_type != 1:  # 非 F16 时启用 Flash Attention
+        if flash_attn or kv_type != 1:  # 启用 Flash Attention 算子融合加速
             cparams.flash_attn_type = 1  # LLAMA_FLASH_ATTN_TYPE_ENABLED
         self.ctx = _lib.llama_init_from_model(self.model, cparams)
         if not self.ctx:
@@ -390,7 +391,8 @@ class LlamaModel:
         self._prefix_len: int = 0
         self._prefix_in_kv: bool = False
         kv_name = "Q8_0" if kv_type == 8 else "F16" if kv_type == 1 else f"type{kv_type}"
-        print(f"Model loaded: n_ctx={n_ctx}, n_gpu_layers={n_gpu_layers}, kv_cache={kv_name}")
+        fa_name = "FA2" if (flash_attn or kv_type != 1) else "standard"
+        print(f"Model loaded: n_ctx={n_ctx}, n_gpu_layers={n_gpu_layers}, kv_cache={kv_name}, attn={fa_name}, n_batch={n_batch}")
 
     def _get_meta(self, key: str) -> str:
         """Get a metadata string from the model by key."""

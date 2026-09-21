@@ -39,6 +39,7 @@ class Task:
     quality: dict = field(default_factory=dict)
     ocr_model: str = "unlimited"
     error: str = ""
+    tldr: dict = field(default_factory=dict)
 
     # Cancellation
     _cancel_event: Optional[threading.Event] = field(default=None, repr=False, compare=False)
@@ -57,6 +58,7 @@ class Task:
             "pages_done": self.pages_done,
             "quality": self.quality,
             "output_path": self.output_path,
+            "tldr": self.tldr,
             "error": self.error,
         }
 
@@ -132,6 +134,7 @@ class TaskManager:
             "ocr_model": getattr(task, 'ocr_model', 'unlimited'),
             "created_at": task.created_at,
             "quality": task.quality,
+            "tldr": getattr(task, 'tldr', {}),
             "blocks": task.blocks,
             "figures": [os.path.basename(f) for f in task.figures],
         }
@@ -186,6 +189,7 @@ class TaskManager:
                     ocr_model=data.get("ocr_model", "unlimited"),
                     created_at=data.get("created_at", 0),
                     quality=data.get("quality", {}),
+                    tldr=data.get("tldr", {}),
                 )
                 # Store figure paths relative to history dir
                 task.figures = [
@@ -215,6 +219,7 @@ class TaskManager:
             task.blocks = data.get("blocks", [])
             task.ocr_model = data.get("ocr_model", getattr(task, 'ocr_model', 'unlimited'))
             task.quality = data.get("quality", task.quality)
+            task.tldr = data.get("tldr", getattr(task, 'tldr', {}))
         except Exception:
             pass
         return task

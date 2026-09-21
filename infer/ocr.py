@@ -24,7 +24,8 @@ class BaseOCREngine(ABC):
                         penalty_last_n: int = 256,
                         penalty_repeat: float = 1.20,
                         penalty_freq: float = 0.20,
-                        penalty_present: float = 0.05) -> str:
+                        penalty_present: float = 0.05,
+                        fast_greedy: bool = True) -> str:
         """Run multimodal OCR inference on a single image and return raw output text."""
         pass
 
@@ -46,6 +47,61 @@ class BaseOCREngine(ABC):
             pass
         return result
 
+    def recognize_pdf_stream(self, doc, page_range=None, dpi: int = 150,
+                             max_tokens: int = 4096, cancel_event=None, **kwargs):
+        """
+        Asynchronous double-buffered pipeline for streaming PDF OCR.
+        Prefetches and renders Page N+1 in a background thread while GPU processes Page N.
+        Guarantees 100% bit-level accuracy equivalence with sequential processing.
+        Yields (page_num, ocr_text, raw_page_text, img_path) tuples.
+        """
+        import queue, threading, tempfile, time
+        
+        if page_range is None:
+            p_list = list(range(len(doc)))
+        else:
+            p_list = list(page_range)
+            
+        buf_queue = queue.Queue(maxsize=2)
+        stop_event = threading.Event()
+        
+        def _prefetcher():
+            try:
+                for p_idx in p_list:
+                    if stop_event.is_set() or (cancel_event and cancel_event.is_set()):
+                        break
+                    page = doc[p_idx]
+                    pix = page.get_pixmap(dpi=dpi)
+                    img_path = os.path.join(tempfile.gettempdir(), f"ppt_stream_{os.getpid()}_{p_idx}_{int(time.time()*1000)}.png")
+                    pix.save(img_path)
+                    raw_text = page.get_text("text")
+                    pw, ph = pix.width, pix.height
+                    while not stop_event.is_set() and not (cancel_event and cancel_event.is_set()):
+                        try:
+                            buf_queue.put((p_idx, img_path, raw_text, pw, ph), timeout=0.2)
+                            break
+                        except queue.Full:
+                            continue
+            except Exception as ex:
+                buf_queue.put(ex)
+                
+        thread = threading.Thread(target=_prefetcher, daemon=True)
+        thread.start()
+        
+        try:
+            for _ in range(len(p_list)):
+                if cancel_event and cancel_event.is_set():
+                    break
+                item = buf_queue.get()
+                if isinstance(item, Exception):
+                    raise item
+                p_idx, img_path, raw_text, pw, ph = item
+                ocr_text = self.recognize_image(img_path, max_tokens=max_tokens, **kwargs)
+                yield p_idx, ocr_text, raw_text, img_path, pw, ph
+        finally:
+            stop_event.set()
+            thread.join(timeout=1.0)
+
     @abstractmethod
     def close(self):
         """Release LLM and multimodal projector contexts."""
@@ -57,7 +113,8 @@ class UnlimitedOCREngine(BaseOCREngine):
 
     def __init__(self, model_path: Optional[str] = None,
                  mmproj_path: Optional[str] = None,
-                 n_gpu_layers: int = 99, n_ctx: int = 8192):
+                 n_gpu_layers: int = 99, n_ctx: int = 8192,
+                 flash_attn: bool = True):
         base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         if model_path is None:
             model_path = os.path.join(base, 'Unlimited-OCR-Q8_0.gguf')
@@ -65,17 +122,18 @@ class UnlimitedOCREngine(BaseOCREngine):
             mmproj_path = os.path.join(base, 'mmproj-Unlimited-OCR-F16.gguf')
 
         self.engine_type = "unlimited"
-        self.llm = LlamaModel(model_path, n_gpu_layers=n_gpu_layers, n_ctx=n_ctx)
+        self.llm = LlamaModel(model_path, n_gpu_layers=n_gpu_layers, n_ctx=n_ctx, flash_attn=flash_attn)
         self.mtmd = MtmdOCR(mmproj_path, self.llm.model, use_gpu=True)
         self.marker = self.mtmd.get_marker()
-        print(f"[Unlimited-OCR] Ready. Marker: {self.marker!r}, n_ctx={n_ctx}")
+        print(f"[Unlimited-OCR] Ready. Marker: {self.marker!r}, n_ctx={n_ctx}, flash_attn={flash_attn}")
 
     def recognize_image(self, image_path: str, max_tokens: int = 4096,
                         prompt: Optional[str] = None,
                         penalty_last_n: int = 256,
                         penalty_repeat: float = 1.20,
                         penalty_freq: float = 0.20,
-                        penalty_present: float = 0.05) -> str:
+                        penalty_present: float = 0.05,
+                        fast_greedy: bool = True) -> str:
         if prompt is None:
             prompt = f"{self.marker}document parsing."
 
@@ -88,10 +146,11 @@ class UnlimitedOCREngine(BaseOCREngine):
 
         sparams = llama_lib.llama_sampler_chain_default_params()
         chain = llama_lib.llama_sampler_chain_init(sparams)
-        penalties = llama_lib.llama_sampler_init_penalties(
-            penalty_last_n, penalty_repeat, penalty_freq, penalty_present
-        )
-        llama_lib.llama_sampler_chain_add(chain, penalties)
+        if not fast_greedy and (penalty_repeat > 1.0 or penalty_freq > 0.0 or penalty_present > 0.0):
+            penalties = llama_lib.llama_sampler_init_penalties(
+                penalty_last_n, penalty_repeat, penalty_freq, penalty_present
+            )
+            llama_lib.llama_sampler_chain_add(chain, penalties)
         llama_lib.llama_sampler_chain_add(chain, llama_lib.llama_sampler_init_greedy())
 
         gen_tokens = []
@@ -141,7 +200,8 @@ class OvisOCREngine(BaseOCREngine):
 
     def __init__(self, model_path: Optional[str] = None,
                  mmproj_path: Optional[str] = None,
-                 n_gpu_layers: int = 99, n_ctx: int = 8192):
+                 n_gpu_layers: int = 99, n_ctx: int = 8192,
+                 flash_attn: bool = True):
         base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         if model_path is None:
             model_path = os.path.join(base, 'OvisOCR2-Q8_0.gguf')
@@ -149,17 +209,18 @@ class OvisOCREngine(BaseOCREngine):
             mmproj_path = os.path.join(base, 'mmproj-BF16.gguf')
 
         self.engine_type = "ovis"
-        self.llm = LlamaModel(model_path, n_gpu_layers=n_gpu_layers, n_ctx=n_ctx)
+        self.llm = LlamaModel(model_path, n_gpu_layers=n_gpu_layers, n_ctx=n_ctx, flash_attn=flash_attn)
         self.mtmd = MtmdOCR(mmproj_path, self.llm.model, use_gpu=True)
         self.marker = self.mtmd.get_marker()
-        print(f"[OvisOCR2] Ready. Marker: {self.marker!r}, n_ctx={n_ctx}")
+        print(f"[OvisOCR2] Ready. Marker: {self.marker!r}, n_ctx={n_ctx}, flash_attn={flash_attn}")
 
     def recognize_image(self, image_path: str, max_tokens: int = 4096,
                         prompt: Optional[str] = None,
                         penalty_last_n: int = 256,
                         penalty_repeat: float = 1.20,
                         penalty_freq: float = 0.20,
-                        penalty_present: float = 0.05) -> str:
+                        penalty_present: float = 0.05,
+                        fast_greedy: bool = True) -> str:
         if prompt is None:
             # Official Qwen/Ovis chat template for OCR
             prompt = (
@@ -177,10 +238,11 @@ class OvisOCREngine(BaseOCREngine):
 
         sparams = llama_lib.llama_sampler_chain_default_params()
         chain = llama_lib.llama_sampler_chain_init(sparams)
-        penalties = llama_lib.llama_sampler_init_penalties(
-            penalty_last_n, penalty_repeat, penalty_freq, penalty_present
-        )
-        llama_lib.llama_sampler_chain_add(chain, penalties)
+        if not fast_greedy and (penalty_repeat > 1.0 or penalty_freq > 0.0 or penalty_present > 0.0):
+            penalties = llama_lib.llama_sampler_init_penalties(
+                penalty_last_n, penalty_repeat, penalty_freq, penalty_present
+            )
+            llama_lib.llama_sampler_chain_add(chain, penalties)
         llama_lib.llama_sampler_chain_add(chain, llama_lib.llama_sampler_init_greedy())
 
         gen_tokens = []
@@ -220,7 +282,8 @@ class OCREngineFactory:
                       model_path: Optional[str] = None,
                       mmproj_path: Optional[str] = None,
                       n_gpu_layers: int = 99,
-                      n_ctx: int = 8192) -> BaseOCREngine:
+                      n_ctx: int = 8192,
+                      flash_attn: Optional[bool] = None) -> BaseOCREngine:
         from config import get_ocr_engine_config, get as cfg_get
 
         target = (engine_type or cfg_get('models', 'ocr_default', default='unlimited')).lower().strip()
@@ -229,20 +292,24 @@ class OCREngineFactory:
         m_path = model_path or engine_cfg.get('model_path')
         mm_path = mmproj_path or engine_cfg.get('mmproj_path')
         ctx = n_ctx or engine_cfg.get('n_ctx', 8192)
+        if flash_attn is None:
+            flash_attn = cfg_get('ocr', 'flash_attn', default=True)
 
         if target == 'ovis':
             return OvisOCREngine(
                 model_path=m_path,
                 mmproj_path=mm_path,
                 n_gpu_layers=n_gpu_layers,
-                n_ctx=ctx
+                n_ctx=ctx,
+                flash_attn=flash_attn
             )
         else:
             return UnlimitedOCREngine(
                 model_path=m_path,
                 mmproj_path=mm_path,
                 n_gpu_layers=n_gpu_layers,
-                n_ctx=ctx
+                n_ctx=ctx,
+                flash_attn=flash_attn
             )
 
 

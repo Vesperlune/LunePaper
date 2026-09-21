@@ -1,5 +1,6 @@
 """REST API routes."""
-import os, io, shutil, tempfile, threading
+import os, io, shutil, tempfile, threading, re, zipfile
+from urllib.parse import quote
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
@@ -105,382 +106,527 @@ async def cancel_translation(task_id: str):
     return {"status": "cancelled"}
 
 
-_KATEX_CSS = None
-_KATEX_JS = None
-_KATEX_AUTORENDER_JS = None
+def _ensure_task_tldr(task) -> dict:
+    tldr = getattr(task, "tldr", {}) or {}
+    if tldr and any(tldr.values()):
+        return tldr
+    try:
+        from backend.tldr_extractor import extract_paper_tldr_from_blocks
+        blocks = getattr(task, "blocks", []) or []
+        extracted = extract_paper_tldr_from_blocks(blocks)
+        if extracted and any(extracted.values()):
+            task.tldr = extracted
+            task_manager.update(task.task_id, tldr=extracted)
+            task_manager.save_task(task.task_id)
+            return extracted
+    except Exception as e:
+        print(f"  [TL;DR] Auto-extraction error for {task.task_id}: {e}")
+    return {}
 
 
-def _get_katex_assets():
-    """Load local KaTeX CSS, JS, and auto-render JS from frontend node_modules if available."""
-    global _KATEX_CSS, _KATEX_JS, _KATEX_AUTORENDER_JS
-    if _KATEX_CSS is None:
-        try:
-            katex_dir = os.path.normpath(
-                os.path.join(os.path.dirname(__file__), "..", "frontend", "node_modules", "katex", "dist")
+AFFILIATION_REGEX = re.compile(r'\b(university|college|institute|institution|department|dept\.?|laboratory|laboratories|labs?|school|center|centre|academy|faculty|corporation|inc\.?|corp\.?|llc|ltd\.?|technologies|hospital|research|google|microsoft|meta|apple|amazon|openai|deepmind|baidu|tencent|alibaba|huawei|bytedance|tsinghua|peking|stanford|mit|berkeley|cmu|harvard|oxford|cambridge|toronto|carnegie|division|telecom)\b', re.IGNORECASE)
+NOTE_REGEX = re.compile(r'\b(equal contribution|correspondence|corresponding author|work performed|listing order|all authors contributed|supported by|grant|project funded|technical report)\b', re.IGNORECASE)
+EMAIL_REGEX = re.compile(r'(?:\{[^}]+\}|[a-zA-Z0-9._%+-]+)@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
+URL_REGEX = re.compile(r'https?://[^\s)]+')
+
+
+def _parse_author_metadata(candidate_blocks, all_blocks=None):
+    authors, affiliations, emails, urls, notes, unclassified = [], [], [], [], [], []
+    zh_affiliations, zh_notes = [], []
+    seen_emails, seen_affils, seen_authors, seen_urls = set(), set(), set(), set()
+
+    # Harvest URLs and footnotes from all Page 1 blocks (e.g. GitHub repos in abstract, footnotes at bottom of page 1)
+    if all_blocks:
+        for b in all_blocks:
+            if b.get('page') != 1:
+                continue
+            raw_p1 = b.get('en', '')
+            raw_p1 = re.sub(r'(https?:\/\/[a-zA-Z0-9_.-]+)\s*\.\s*([a-zA-Z]{2,}[^\s)]*)', r'\1.\2', raw_p1)
+            for u in URL_REGEX.findall(raw_p1):
+                clean_u = re.sub(r'[.,;)]+$', '', u)
+                if clean_u not in seen_urls:
+                    seen_urls.add(clean_u)
+                    urls.append(clean_u)
+            lines_p1 = [s.strip() for s in re.split(r'[\r\n]+', raw_p1) if s.strip()]
+            for lp in lines_p1:
+                if NOTE_REGEX.search(lp) or ((lp.startswith('*') or lp.startswith('†')) and len(lp) > 25):
+                    if lp not in notes:
+                        notes.append(lp)
+                        if b.get('zh') and b['zh'] != b['en'] and not b['zh'].startswith('[ERROR') and b['zh'] not in zh_notes:
+                            zh_notes.append(b['zh'])
+
+    def add_author(item):
+        name = item.strip()
+        if not name: return
+        markers = []
+        name = re.sub(
+            r'\$\s*\^?\{?\\?(dagger|ddagger|\*|[0-9a-z,\s]+)\}?\s*\$',
+            lambda m: (
+                [markers.append('†' if x.strip()=='dagger' else '‡' if x.strip()=='ddagger' else x.strip()) for x in re.split(r'[,]+', m.group(1)) if x.strip()]
+            ) and '',
+            name
+        )
+        name = re.sub(r'\$\s*(\*|†|‡|[0-9]+)\s*\$', lambda m: markers.append(m.group(1)) or '', name)
+        name = re.sub(
+            r'[\s,]*([*†‡§0-9]+|\([0-9*†‡§,]+\)|\[[0-9*†‡§,]+\])[\s,]*$',
+            lambda m: [markers.append(x) for x in re.findall(r'[*†‡§0-9]+', m.group(1))] and '',
+            name
+        ).strip()
+        name = re.sub(r'[*†‡§]+$', lambda m: markers.append(m.group(0)) or '', name).strip()
+        if name and 2 <= len(name) <= 50 and re.search(r'[a-zA-Z\u00C0-\u024F\u4e00-\u9fa5]', name):
+            key = name.lower()
+            if key not in seen_authors:
+                seen_authors.add(key)
+                authors.append({'name': name, 'markers': list(dict.fromkeys(markers))})
+        elif item and not re.match(r'^[\s*†‡§0-9]+$', item):
+            unclassified.append(item)
+
+    def add_affil(aff, zh=None):
+        clean = re.sub(r'^[0-9*†‡§,\s]+|[,\s]+$', '', aff).strip()
+        if clean and clean.lower() not in seen_affils:
+            seen_affils.add(clean.lower())
+            affiliations.append(clean)
+            if zh and zh != aff and not zh.startswith('[ERROR'):
+                clean_zh = re.sub(r'^[0-9*†‡§,\s]+|[,\s]+$', '', zh).strip()
+                if clean_zh and clean_zh not in zh_affiliations:
+                    zh_affiliations.append(clean_zh)
+
+    for b in candidate_blocks:
+        raw = b.get('en', '')
+        if b.get('type') == 'table':
+            raw = re.sub(r'</td>', '\n', raw, flags=re.I)
+            raw = re.sub(r'<[^>]+>', ' ', raw)
+        raw = re.sub(r'(https?:\/\/[a-zA-Z0-9_.-]+)\s*\.\s*([a-zA-Z]{2,}[^\s)]*)', r'\1.\2', raw)
+        lines = [s.strip() for s in re.split(r'[\r\n]+', raw) if s.strip()]
+        for line in lines:
+            for u in URL_REGEX.findall(line):
+                clean_u = re.sub(r'[.,;)]+$', '', u)
+                if clean_u not in seen_urls:
+                    seen_urls.add(clean_u)
+                    urls.append(clean_u)
+            line = URL_REGEX.sub('', line).strip()
+
+            for em in EMAIL_REGEX.findall(line):
+                em_clean = re.sub(r'\s+', '', em)
+                if em_clean not in seen_emails:
+                    seen_emails.add(em_clean)
+                    emails.append(em_clean)
+            line = EMAIL_REGEX.sub('', line).strip()
+            if not line: continue
+
+            if NOTE_REGEX.search(line) or ((line.startswith('*') or line.startswith('†')) and len(line) > 25):
+                if line not in notes:
+                    notes.append(line)
+                    if b.get('zh') and b['zh'] != b['en'] and not b['zh'].startswith('[ERROR') and b['zh'] not in zh_notes:
+                        zh_notes.append(b['zh'])
+                continue
+
+            has_affil = bool(AFFILIATION_REGEX.search(line))
+            is_pure_affil = bool(re.match(r'^\s*(?:\$\^?\{[0-9*†‡,]+\}\$|\^[0-9*†‡,]+|[0-9*†‡§]+\s+)', line)) and has_affil
+
+            if is_pure_affil or (has_affil and len(AFFILIATION_REGEX.findall(line)) >= 2):
+                parts = re.split(r'(?:\$\^?\{[0-9*†‡,]+\}\$|\^[0-9*†‡,]+|[;]+|\s{2,})', line)
+                for part in parts:
+                    p = re.sub(r'^[0-9*†‡§,\s]+|[,\s]+$', '', part).strip()
+                    if p and len(p) > 3 and p.lower() not in seen_affils and AFFILIATION_REGEX.search(p):
+                        add_affil(p, b.get('zh'))
+                continue
+
+            if has_affil:
+                m = AFFILIATION_REGEX.search(line)
+                if m and m.start() > 3 and ',' not in line[:m.start()]:
+                    add_author(line[:m.start()].strip())
+                    add_affil(line[m.start():].strip(), b.get('zh'))
+                    continue
+                else:
+                    add_affil(line, b.get('zh'))
+                    continue
+
+            # Split authors by comma (not inside braces)
+            parts = re.split(r',\s*(?![^{}]*\})|\s+and\s+', line)
+            for part in parts:
+                add_author(part)
+
+    return {
+        'authors': authors, 'affiliations': affiliations, 'emails': emails,
+        'urls': urls, 'notes': notes, 'unclassified': unclassified,
+        'zh_affiliations': zh_affiliations, 'zh_notes': zh_notes,
+    }
+
+
+def is_code_caption_text(text: str) -> bool:
+    if not text:
+        return False
+    t = text.strip()
+    if len(t) > 160:
+        return False
+    return bool(
+        re.match(r'^\s*\([a-z0-9]+\)\s*(?:[A-Za-z0-9_-]+\s+)?(?:pseudo\s*code|code|algorithm|implementation)', t, re.I) or
+        re.match(r'^\s*(?:Listing|Algorithm)\s+\d+[a-z]?\s*[:\.]', t, re.I) or
+        re.match(r'^\s*(?:Sampled\s+API\s+List|Prompt\s+Template)\b', t, re.I)
+    )
+
+
+def is_code_start_text(text: str) -> bool:
+    if not text:
+        return False
+    t = text.strip()
+    return bool(
+        re.search(r'^\s*(?:def\s+[a-zA-Z0-9_]|class\s+[a-zA-Z0-9_]|Algorithm\s+\d|Listing\s+\d|function\s+[a-zA-Z0-9_]|procedure\s+[a-zA-Z0-9_])', t, re.I | re.M) or
+        re.search(r'^\s*(?:system_prompt|user_prompt|diversity_user_prompt|Finish_function_description)\s*:', t, re.I) or
+        re.match(r'^\s*(?:\[\s*\{|\{\s*"name"|\{\s*"Query")', t)
+    )
+
+
+def clean_code_block_text(code: str) -> str:
+    if not code:
+        return ''
+    c = code.replace('\r\n', '\n')
+    c = re.sub(r'\n\s*→\s*', ' ', c)
+    c = c.replace('→', '->')
+    c = re.sub(r'\\dots\b', '...', c)
+    c = re.sub(r'\b([a-zA-Z0-9_]+)\s*\.\s+([a-zA-Z0-9_]+)\b', r'\1.\2', c)
+    c = re.sub(r'\.\s+([a-zA-Z0-9_]+)', r'.\1', c)
+    return c
+
+
+def generate_bilingual_markdown(task) -> str:
+    from infer.ovis_parser import clean_latex_math
+    from infer.translate_v2 import is_code_block_text
+
+    blocks = getattr(task, "blocks", []) or []
+    tldr = getattr(task, "tldr", {}) or {}
+    filename = getattr(task, "filename", "paper.pdf")
+
+    md_lines = []
+
+    # Identify page 1 primary title & author blocks
+    first_title_idx = next((i for i, b in enumerate(blocks) if b.get('page') == 1 and b.get('type') == 'title'), -1)
+    last_title_idx = first_title_idx
+    if first_title_idx != -1:
+        while (last_title_idx + 1 < len(blocks) and
+               blocks[last_title_idx + 1].get('page') == 1 and
+               blocks[last_title_idx + 1].get('type') == 'title'):
+            nxt = (blocks[last_title_idx + 1].get('en') or '').strip().lower()
+            if nxt.startswith('abstract') or nxt.startswith('摘要'):
+                break
+            last_title_idx += 1
+
+    candidate_author_blocks = []
+    author_end_idx = -1
+    if first_title_idx != -1:
+        for i in range(last_title_idx + 1, len(blocks)):
+            b = blocks[i]
+            if b.get('page') != 1:
+                break
+            en_lower = (b.get('en') or '').strip().lower()
+            is_table_grid = b.get('type') == 'table' and (EMAIL_REGEX.search(b.get('en', '')) or AFFILIATION_REGEX.search(b.get('en', '')))
+            if is_table_grid:
+                candidate_author_blocks.append(b)
+                continue
+            is_author_or_affil = (
+                len((b.get('en') or '').split(',')) >= 3 or
+                bool(re.search(r'\$\^?\{?[*†‡0-9a-z,\s]+\}?\s*\$', b.get('en', ''))) or
+                bool(AFFILIATION_REGEX.search(b.get('en', ''))) or
+                bool(EMAIL_REGEX.search(b.get('en', ''))) or
+                bool(NOTE_REGEX.search(en_lower)) or
+                bool(re.search(r'\b(?:correspondence|equal contribution|university|institute|laboratory|department|school)\b', en_lower))
             )
-            css_path = os.path.join(katex_dir, "katex.min.css")
-            js_path = os.path.join(katex_dir, "katex.min.js")
-            auto_path = os.path.join(katex_dir, "contrib", "auto-render.min.js")
+            is_stop = (
+                b.get('type') == 'header' or
+                (b.get('type') == 'title' and not en_lower.startswith('author')) or
+                en_lower.startswith('abstract') or
+                en_lower.startswith('摘要') or
+                re.match(r'^(?:(?:\d+\.?|[I|V|X]+\.?)\s+)?(?:introduction|overview)', en_lower) or
+                b.get('type') in ('equation', 'table', 'image', 'chart', 'figure') or
+                (not is_author_or_affil and len(b.get('en', '')) > 280)
+            )
+            if is_stop:
+                author_end_idx = i
+                break
+            if b.get('type') == 'aside_text' and 'arxiv' in en_lower:
+                continue
+            candidate_author_blocks.append(b)
 
-            if os.path.exists(css_path) and os.path.exists(js_path) and os.path.exists(auto_path):
-                with open(css_path, "r", encoding="utf-8") as f:
-                    css = f.read()
-                # Rewrite relative font URLs to CDN URLs so fonts load nicely online, while fallbacks work offline
-                css = css.replace("url(fonts/", "url(https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/fonts/")
-                _KATEX_CSS = css
+    should_group_authors = (
+        len(candidate_author_blocks) > 0 and
+        (len(candidate_author_blocks) >= 2 or
+         EMAIL_REGEX.search(candidate_author_blocks[0].get('en', '')) or
+         AFFILIATION_REGEX.search(candidate_author_blocks[0].get('en', '')) or
+         '*' in (candidate_author_blocks[0].get('en') or '') or
+         '$' in (candidate_author_blocks[0].get('en') or ''))
+    )
 
-                with open(js_path, "r", encoding="utf-8") as f:
-                    _KATEX_JS = f.read()
+    # 1. Primary Title
+    if first_title_idx != -1:
+        t_en = blocks[first_title_idx].get('en', '').strip()
+        t_zh = blocks[first_title_idx].get('zh', '').strip()
+        md_lines.append(f"# {t_en}\n")
+        if t_zh and t_zh != t_en and not t_zh.startswith('[ERROR'):
+            md_lines.append(f"# {t_zh}\n")
+    else:
+        md_lines.append(f"# {filename}\n")
 
-                with open(auto_path, "r", encoding="utf-8") as f:
-                    _KATEX_AUTORENDER_JS = f.read()
-        except Exception as e:
-            pass
-    return _KATEX_CSS, _KATEX_JS, _KATEX_AUTORENDER_JS
+    # 2. Author metadata
+    if should_group_authors:
+        meta = _parse_author_metadata(candidate_author_blocks, all_blocks=blocks)
+        if meta['authors']:
+            auth_str = ", ".join([
+                (a['name'] + (f" ({''.join(a['markers'])})" if a['markers'] else ""))
+                for a in meta['authors']
+            ])
+            md_lines.append(f"**作者 / Authors**: {auth_str}\n")
+        if meta['affiliations']:
+            aff_str = " | ".join(meta['affiliations'])
+            md_lines.append(f"**单位 / Affiliations**: {aff_str}\n")
+        if meta['zh_affiliations']:
+            zh_aff_str = " | ".join(meta['zh_affiliations'])
+            md_lines.append(f"**中文机构**: {zh_aff_str}\n")
+        if meta['emails']:
+            md_lines.append(f"**联系方式 / Contacts**: {', '.join(meta['emails'])}\n")
+        if meta['urls']:
+            md_lines.append(f"**代码与链接 / Links**: {', '.join(meta['urls'])}\n")
+        if meta['notes']:
+            for note in meta['notes']:
+                md_lines.append(f"> *{note}*\n")
+        if meta['zh_notes']:
+            for zn in meta['zh_notes']:
+                md_lines.append(f"> *{zn}*\n")
+        md_lines.append("\n")
+
+    # 3. Paper TL;DR
+    if tldr and any(tldr.values()):
+        md_lines.append("> ## 论文速读 (Paper TL;DR)\n>")
+        if tldr.get('background'):
+            md_lines.append(f"> - **研究背景与核心痛点**: {tldr['background']}\n>")
+        if tldr.get('method'):
+            md_lines.append(f"> - **核心创新与方法方案**: {tldr['method']}\n>")
+        if tldr.get('metrics'):
+            md_lines.append(f"> - **实验性能与关键指标**: {tldr['metrics']}\n>")
+        if tldr.get('conclusion'):
+            md_lines.append(f"> - **工作价值与学术结论**: {tldr['conclusion']}\n>")
+        md_lines.append("\n")
+
+    skip_until_idx = (author_end_idx - 1) if (should_group_authors and author_end_idx != -1) else (
+        (last_title_idx + len(candidate_author_blocks)) if should_group_authors else -1
+    )
+
+    last_page = 0
+    i = 0
+    n = len(blocks)
+    while i < n:
+        if i <= skip_until_idx:
+            i += 1
+            continue
+
+        b = blocks[i]
+        page = b.get('page', 1)
+        if page != last_page:
+            md_lines.append(f"\n---\n<!-- 第 {page} 页 / Page {page} -->\n")
+            last_page = page
+
+        # Skip primary title on page 1 as it was rendered above
+        if i == first_title_idx:
+            i += 1
+            continue
+
+        # Code cluster check
+        is_cap = is_code_caption_text(b.get('en', ''))
+        next_is_code = (i + 1 < n and blocks[i+1].get('page') == page and
+                        (is_code_block_text(blocks[i+1].get('en', '')) or blocks[i+1].get('type') == 'algorithm'))
+        is_code = is_code_block_text(b.get('en', '')) or b.get('type') == 'algorithm'
+
+        if is_code or (is_cap and next_is_code):
+            j = i
+            cluster = []
+            while j < n and blocks[j].get('page') == page:
+                cur = blocks[j]
+                cur_is_code = is_code_block_text(cur.get('en', '')) or cur.get('type') == 'algorithm'
+                cur_is_cap = is_code_caption_text(cur.get('en', ''))
+                has_code_or_cap = any(
+                    blocks[k].get('page') == page and
+                    (is_code_block_text(blocks[k].get('en', '')) or is_code_caption_text(blocks[k].get('en', '')))
+                    for k in range(j + 1, n)
+                )
+                cur_is_comment = (len(cur.get('en', '')) < 120 and has_code_or_cap and
+                                  not bool(re.match(r'^\d+\.?\d*\s+[A-Z]', cur.get('en', '').strip())))
+                if cur_is_code or cur_is_cap or cur_is_comment:
+                    cluster.append(cur)
+                    j += 1
+                else:
+                    break
+
+            code_and_comments = [c for c in cluster if not is_code_caption_text(c.get('en', ''))]
+            caption_blocks = [c for c in cluster if is_code_caption_text(c.get('en', ''))]
+
+            if code_and_comments:
+                snippets = []
+                cur_sn = []
+                for item in code_and_comments:
+                    if cur_sn and is_code_start_text(item.get('en', '')):
+                        snippets.append(cur_sn)
+                        cur_sn = [item]
+                    else:
+                        cur_sn.append(item)
+                if cur_sn:
+                    snippets.append(cur_sn)
+
+                for sn_idx, sn in enumerate(snippets):
+                    full_code = []
+                    for item in sn:
+                        en_text = item.get('en', '').strip()
+                        if not is_code_block_text(en_text) and not en_text.startswith('#'):
+                            full_code.append('# ' + en_text)
+                        else:
+                            full_code.append(en_text)
+                    clean_full = clean_code_block_text('\n'.join(full_code))
+                    matched_cap = caption_blocks[sn_idx] if sn_idx < len(caption_blocks) else (
+                        caption_blocks[0] if caption_blocks else None
+                    )
+
+                    md_lines.append(f"```python\n{clean_full}\n```\n")
+                    if matched_cap:
+                        cap_en = matched_cap.get('en', '').strip()
+                        cap_zh = matched_cap.get('zh', '').strip()
+                        md_lines.append(f"*{cap_en}*  ")
+                        if cap_zh and cap_zh != cap_en and not cap_zh.startswith('[ERROR'):
+                            md_lines.append(f"*{cap_zh}*\n")
+                        else:
+                            md_lines.append("\n")
+                i = j
+                continue
+
+        # Image / Chart / Figure
+        btype = b.get('type')
+        if btype in ('image', 'chart', 'figure'):
+            fid = b.get('figure_id')
+            cap_en = ''
+            cap_zh = ''
+            if i + 1 < n and blocks[i+1].get('type') in ('image_caption', 'image_footnote'):
+                cap_en = blocks[i+1].get('en', '').strip()
+                cap_zh = blocks[i+1].get('zh', '').strip()
+                i += 1
+            if fid:
+                md_lines.append(f"![{cap_en or 'Figure'}](figures/{fid})\n")
+            if cap_en:
+                md_lines.append(f"*{cap_en}*  ")
+                if cap_zh and cap_zh != cap_en and not cap_zh.startswith('[ERROR'):
+                    md_lines.append(f"*{cap_zh}*\n")
+                else:
+                    md_lines.append("\n")
+            i += 1
+            continue
+
+        # Equation
+        if btype == 'equation':
+            raw = b.get('en', '').strip()
+            clean = clean_latex_math(raw)
+            if clean.startswith('$$') and clean.endswith('$$'):
+                clean = clean[2:-2].strip()
+            elif clean.startswith(r'\[') and clean.endswith(r'\]'):
+                clean = clean[2:-2].strip()
+            md_lines.append(f"$$\n{clean}\n$$\n")
+            i += 1
+            continue
+
+        # Title / Header
+        if btype == 'title':
+            en = b.get('en', '').strip()
+            zh = b.get('zh', '').strip()
+            md_lines.append(f"## {en}\n")
+            if zh and zh != en and not zh.startswith('[ERROR'):
+                md_lines.append(f"### {zh}\n")
+            i += 1
+            continue
+
+        # Table
+        if btype == 'table':
+            raw = b.get('en', '').strip()
+            zh = b.get('zh', '').strip()
+            md_lines.append(f"{raw}\n")
+            if zh and zh != raw and not zh.startswith('[ERROR'):
+                md_lines.append(f"{zh}\n")
+            i += 1
+            continue
+
+        # Passthrough & normal text
+        en = b.get('en', '').strip()
+        zh = b.get('zh', '').strip()
+        if en:
+            md_lines.append(f"{en}\n")
+            if zh and zh != en and not zh.startswith('[ERROR') and not b.get('passthrough'):
+                md_lines.append(f"{zh}\n")
+        i += 1
+
+    return '\n'.join(md_lines)
 
 
 @router.get("/download/{task_id}")
 async def download_result(task_id: str):
-    """Download bilingual HTML with embedded images."""
-    import base64
-    from infer.ovis_parser import clean_latex_math
-
+    """Download ZIP archive containing bilingual Markdown and extracted figure images."""
     task = task_manager.get(task_id)
+    if not task or not getattr(task, 'blocks', None):
+        task = task_manager.load_task_blocks(task_id) or task
     if not task:
         raise HTTPException(404, "Task not found")
     if task.status != "completed":
         raise HTTPException(400, "Translation not completed yet")
 
-    if not task.blocks:
-        task = task_manager.load_task_blocks(task_id) or task
+    _ensure_task_tldr(task)
 
-    # Build figure lookup: basename -> base64 data URI
-    fig_data = {}
-    for fig_path in task.figures:
-        if os.path.exists(fig_path):
-            with open(fig_path, "rb") as f:
-                b64 = base64.b64encode(f.read()).decode("ascii")
-            fig_data[os.path.basename(fig_path)] = f"data:image/png;base64,{b64}"
+    # 1. Generate bilingual Markdown
+    markdown_content = generate_bilingual_markdown(task)
 
-    # KaTeX Assets
-    k_css, k_js, k_auto = _get_katex_assets()
-    if k_css and k_js:
-        katex_tags = f"""<style id="katex-embedded-css">{k_css}</style>
-<script id="katex-embedded-js">{k_js}</script>
-<script id="katex-autorender-embedded-js">{k_auto or ''}</script>"""
-    else:
-        katex_tags = """<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js"></script>"""
+    # 2. Collect figure images
+    figures_to_include = {}
+    for fig_path in getattr(task, 'figures', []):
+        if fig_path and os.path.isfile(fig_path):
+            figures_to_include[os.path.basename(fig_path)] = fig_path
 
-    # Build HTML
-    parts = []
-    parts.append(f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{_esc(task.filename)} - LunePaper</title>
-{katex_tags}
-<style>
-  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-  body {{
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans SC", sans-serif;
-    background: #faf8ff;
-    color: #2d2a3e;
-    line-height: 1.7;
-    padding: 2rem;
-    max-width: 960px;
-    margin: 0 auto;
-  }}
-  .header {{
-    text-align: center;
-    padding: 2rem 0 1.5rem;
-    border-bottom: 2px solid #e8e3f3;
-    margin-bottom: 2rem;
-  }}
-  .header h1 {{
-    font-size: 1.6rem;
-    color: #5b4ea8;
-    font-weight: 700;
-    margin-bottom: 0.5rem;
-  }}
-  .header .meta {{
-    font-size: 0.85rem;
-    color: #8b85a3;
-  }}
-  .page-break {{
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-    margin: 2.5rem 0 1.5rem;
-  }}
-  .page-break .badge {{
-    display: inline-flex;
-    align-items: center;
-    gap: 0.4rem;
-    padding: 0.3rem 0.9rem;
-    border-radius: 999px;
-    background: #f3f0fa;
-    border: 1px solid #e8e3f3;
-    font-size: 0.85rem;
-    font-weight: 600;
-    color: #7c6cb8;
-    white-space: nowrap;
-  }}
-  .page-break .line {{
-    flex: 1;
-    height: 1px;
-    background: linear-gradient(to right, #c4b8e0, transparent);
-  }}
-  .block {{
-    margin: 0.8rem 0;
-    padding: 1rem 1.2rem;
-    border-radius: 12px;
-    background: #fff;
-    border: 1px solid #f0ecf8;
-    box-shadow: 0 1px 4px rgba(139,127,199,0.04);
-  }}
-  .block-type {{
-    display: inline-block;
-    font-size: 0.7rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: #8b7fc7;
-    background: #f3f0fa;
-    padding: 0.15rem 0.5rem;
-    border-radius: 4px;
-    margin-bottom: 0.5rem;
-  }}
-  .en {{
-    font-size: 0.95rem;
-    color: #8b85a3;
-    font-style: italic;
-    line-height: 1.7;
-    padding-bottom: 0.6rem;
-  }}
-  .zh {{
-    font-size: 1rem;
-    color: #2d2a3e;
-    line-height: 1.8;
-    border-top: 1px solid #f0ecf8;
-    padding-top: 0.6rem;
-  }}
-  .zh.error {{
-    color: #c47a7a;
-    font-style: italic;
-  }}
-  .title-text {{
-    font-size: 1.25rem;
-    font-weight: 700;
-    color: #2d2a3e;
-    line-height: 1.5;
-  }}
-  .title-text.en {{
-    color: #5a5475;
-    font-style: italic;
-  }}
-  .figure {{
-    text-align: center;
-    margin: 1.2rem 0;
-  }}
-  .figure img {{
-    max-width: 100%;
-    border-radius: 12px;
-    border: 1px solid #f0ecf8;
-    box-shadow: 0 2px 12px rgba(139,127,199,0.08);
-  }}
-  .figure .caption {{
-    font-size: 0.85rem;
-    color: #8b85a3;
-    margin-top: 0.5rem;
-  }}
-  .passthrough {{
-    font-size: 0.95rem;
-    color: #2d2a3e;
-    line-height: 1.7;
-  }}
-  .table-container {{
-    margin: 0.8rem 0;
-    overflow-x: auto;
-    border-radius: 8px;
-    border: 1px solid #e8e3f3;
-    background: #fff;
-    box-shadow: 0 1px 4px rgba(139, 127, 199, 0.04);
-  }}
-  table {{
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.88rem;
-    color: #2d2a3e;
-    text-align: left;
-  }}
-  th, td {{
-    padding: 0.7rem 0.9rem;
-    border-bottom: 1px solid #f0ecf8;
-    border-right: 1px solid #f0ecf8;
-    line-height: 1.5;
-  }}
-  th:last-child, td:last-child {{
-    border-right: none;
-  }}
-  tr:last-child td {{
-    border-bottom: none;
-  }}
-  thead tr, tr:first-child:not(:has(th)) {{
-    background: #f8f6fc;
-  }}
-  th {{
-    font-weight: 600;
-    color: #5b4ea8;
-    background: #f8f6fc;
-  }}
-  tr:hover td {{
-    background: rgba(139, 127, 199, 0.03);
-  }}
-  table .katex {{
-    font-size: 0.95em;
-  }}
-  .separator {{
-    height: 1px;
-    background: linear-gradient(to right, #e8e3f3, transparent);
-    margin: 0.4rem 0;
-  }}
-  .katex-display {{
-    margin: 0.5rem 0;
-    overflow-x: auto;
-    overflow-y: hidden;
-    padding: 0.3rem 0;
-  }}
-  .katex {{
-    font-size: 1.05em;
-  }}
-  @media print {{
-    body {{ padding: 1rem; }}
-    .block {{ break-inside: avoid; }}
-  }}
-</style>
-</head>
-<body>
-<div class="header">
-  <h1>{_esc(task.filename)}</h1>
-  <div class="meta">{task.quality.get('total_blocks', '?')} 个内容块 | 通过率: {task.quality.get('pass_rate', 'N/A')}</div>
-</div>
-""")
+    from backend.task_manager import _task_dir
+    hist_fig_dir = os.path.join(_task_dir(task_id), "figures")
+    if os.path.isdir(hist_fig_dir):
+        for fname in os.listdir(hist_fig_dir):
+            full_p = os.path.join(hist_fig_dir, fname)
+            if os.path.isfile(full_p) and fname not in figures_to_include:
+                figures_to_include[fname] = full_p
 
-    current_page = 0
-    for block in task.blocks:
-        if block['page'] != current_page:
-            current_page = block['page']
-            parts.append(f'<div class="page-break"><span class="badge">第 {current_page} 页</span><span class="line"></span></div>\n')
+    temp_fig_dir = os.path.join(tempfile.gettempdir(), f"ppt_{task_id}_figures")
+    if os.path.isdir(temp_fig_dir):
+        for fname in os.listdir(temp_fig_dir):
+            full_p = os.path.join(temp_fig_dir, fname)
+            if os.path.isfile(full_p) and fname not in figures_to_include:
+                figures_to_include[fname] = full_p
 
-        btype = block['type']
-        en = block.get('en', '')
-        zh = block.get('zh', '')
+    # 3. Create in-memory ZIP archive
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+        base_name = os.path.splitext(task.filename)[0]
+        safe_base = re.sub(r'[\\/*?:"<>|]', '_', base_name).strip() or "paper"
+        md_filename = f"{safe_base}_bilingual.md"
 
-        # Image / Chart blocks
-        if btype in ('image', 'chart', 'figure'):
-            fig_id = block.get('figure_id', '')
-            if fig_id and fig_id in fig_data:
-                parts.append(f'<div class="figure"><img src="{fig_data[fig_id]}" alt="Figure" /><div class="caption">[{_esc(btype)}]</div></div>\n')
-            else:
-                parts.append(f'<div class="figure"><div class="caption">[{_esc(btype)}] (图片未找到)</div></div>\n')
-            continue
+        # Write Markdown file at root of zip
+        zf.writestr(md_filename, markdown_content.encode('utf-8'))
 
-        # Equation blocks — store formatted LaTeX, rendered by KaTeX
-        if btype == 'equation':
-            latex = clean_latex_math(en.strip())
-            if not latex.startswith('$$'):
-                latex = f"$${latex}$$"
-            parts.append(f'<div class="block"><div class="block-type">equation</div><div class="math-block">{latex}</div></div>\n')
-            continue
+        # Write figures into figures/ subfolder in zip
+        for fname, fpath in figures_to_include.items():
+            try:
+                with open(fpath, "rb") as img_f:
+                    zf.writestr(f"figures/{fname}", img_f.read())
+            except Exception as e:
+                print(f"Warning: Failed to add figure {fname} to zip: {e}")
 
-        # Table blocks
-        if btype == 'table':
-            parts.append(f'<div class="block"><div class="block-type">table</div><div class="table-container">{en}</div></div>\n')
-            continue
-
-        # Title blocks — larger font
-        if btype == 'title':
-            parts.append(f'<div class="block"><div class="title-text en">{_esc(en)}</div>')
-            if zh and zh != en:
-                if zh.startswith('[ERROR'):
-                    parts.append(f'<div class="zh error">{_esc(zh)}</div>')
-                else:
-                    parts.append(f'<div class="separator"></div><div class="title-text">{_esc(zh)}</div>')
-            parts.append('</div>\n')
-            continue
-
-        # Passthrough types (ref_text, aside_text, header, footer, algorithm, image_caption, image_footnote)
-        if block.get('passthrough') or btype in ('ref_text', 'aside_text', 'header', 'footer', 'algorithm', 'image_caption', 'image_footnote'):
-            parts.append(f'<div class="block"><span class="block-type">{_esc(btype)}</span><div class="passthrough">{_esc(en)}</div>')
-            if zh and zh != en and not zh.startswith('[ERROR'):
-                parts.append(f'<div class="separator"></div><div class="passthrough">{_esc(zh)}</div>')
-            parts.append('</div>\n')
-            continue
-
-        # Normal text blocks — bilingual
-        parts.append(f'<div class="block">')
-        if btype != 'text':
-            parts.append(f'<span class="block-type">{_esc(btype)}</span>')
-        parts.append(f'<div class="en">{_esc(en)}</div>')
-        if zh:
-            if zh.startswith('[ERROR'):
-                parts.append(f'<div class="separator"></div><div class="zh error">{_esc(zh)}</div>')
-            elif zh != en:
-                parts.append(f'<div class="separator"></div><div class="zh">{_esc(zh)}</div>')
-        parts.append('</div>\n')
-
-    parts.append('<script>')
-    parts.append('function renderAllMath() {')
-    parts.append('  if (typeof renderMathInElement !== "undefined") {')
-    parts.append('    renderMathInElement(document.body, {')
-    parts.append('      delimiters: [')
-    parts.append('        {left: "$$", right: "$$", display: true},')
-    parts.append('        {left: "\\[", right: "\\]", display: true},')
-    parts.append('        {left: "$", right: "$", display: false},')
-    parts.append('        {left: "\\(", right: "\\)", display: false}')
-    parts.append('      ],')
-    parts.append('      throwOnError: false,')
-    parts.append('      ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"]')
-    parts.append('    });')
-    parts.append('  }')
-    parts.append('  if (typeof katex !== "undefined") {')
-    parts.append('    document.querySelectorAll(".math-block").forEach(function(el) {')
-    parts.append('      if (el.querySelector(".katex")) return;')
-    parts.append('      var txt = el.textContent.trim();')
-    parts.append('      if (txt.startsWith("$$") && txt.endsWith("$$")) txt = txt.slice(2, -2).trim();')
-    parts.append('      try { katex.render(txt, el, { displayMode: true, throwOnError: false }); } catch(e) {}')
-    parts.append('    });')
-    parts.append('  }')
-    parts.append('}')
-    parts.append('if (document.readyState === "loading") {')
-    parts.append('  document.addEventListener("DOMContentLoaded", renderAllMath);')
-    parts.append('} else {')
-    parts.append('  renderAllMath();')
-    parts.append('}')
-    parts.append('window.addEventListener("load", renderAllMath);')
-    parts.append('</script>')
-    parts.append('</body>\n</html>')
-
-    html = ''.join(parts)
-    buf = io.BytesIO(html.encode('utf-8'))
-    raw_name = os.path.splitext(task.filename)[0] + "_bilingual.html"
-    # Percent-encode filename for HTTP header (latin-1 safe)
-    from urllib.parse import quote
-    encoded_name = quote(raw_name, safe='')
+    zip_buffer.seek(0)
+    zip_filename = f"{safe_base}_bilingual.zip"
+    encoded_name = quote(zip_filename, safe='')
     return StreamingResponse(
-        buf, media_type="text/html; charset=utf-8",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}"})
-
-
-def _esc(s: str) -> str:
-    """Escape HTML special characters."""
-    return (s.replace("&", "&amp;")
-             .replace("<", "&lt;")
-             .replace(">", "&gt;")
-             .replace('"', "&quot;"))
+        zip_buffer,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}",
+            "Content-Type": "application/zip",
+        }
+    )
 
 
 @router.get("/history")
@@ -489,16 +635,30 @@ async def list_history():
     return task_manager.list_history()
 
 
+
 @router.post("/history/{task_id}/load")
 async def load_history_task(task_id: str):
     """Load a history task's blocks into memory for viewing."""
     task = task_manager.load_task_blocks(task_id)
     if not task:
         raise HTTPException(404, "History task not found")
+    tldr = _ensure_task_tldr(task)
     result = task.to_dict()
     result["blocks"] = task.blocks
+    result["tldr"] = tldr
     result["figures"] = [os.path.basename(f) for f in task.figures]
     return result
+
+
+@router.get("/task/{task_id}/tldr")
+@router.get("/history/{task_id}/tldr")
+async def get_task_tldr(task_id: str):
+    """Retrieve structured Paper TL;DR for a task."""
+    task = task_manager.get(task_id) or task_manager.load_task_blocks(task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    tldr = _ensure_task_tldr(task)
+    return {"task_id": task_id, "tldr": tldr}
 
 
 @router.delete("/history/{task_id}")

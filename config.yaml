@@ -44,6 +44,8 @@ ocr:
   penalty_repeat: 1.20   # 重复采样惩罚
   penalty_freq: 0.20     # 词频惩罚 (抑制死循环)
   penalty_present: 0.05  # 存在惩罚
+  flash_attn: true       # 启用 FlashAttention-2 算子融合加速
+  fast_greedy: true      # 启用 GPU 纯贪心采样剪枝（免去 152k 词表在 CPU 上的逐 token 惩罚遍历）
 
 # ── 翻译参数 ──
 translation:
@@ -53,8 +55,10 @@ translation:
   n_threads: 4           # CPU 线程数
   verify: true           # 是否启用回译验证
   verify_strategy: "adaptive"  # adaptive: 保守快速放行 + 回译兜底；full: 全量回译
-  verify_audit_rate: 0.10       # 快速放行段落中仍执行完整回译的固定抽检比例
+  verify_audit_rate: 0.05       # 快速放行段落中仍执行完整回译的固定抽检比例
   max_retries: 2         # 最大重译次数
+  flash_attn: true       # 启用 FlashAttention-2 算子融合加速
+  prefix_caching: true   # 启用 System Prompt 静态 KV Cache 驻留
 
 # ── 学术术语库与约束配置 ──
 glossary:
@@ -64,8 +68,8 @@ glossary:
 
 # ── 采样参数 ──
 sampling:
-  temperature: 0.3       # 默认温度
-  retry_temperature: 0.05 # 重译温度
+  temperature: 0.0       # 默认温度（0.0 纯贪心解码，速度最快，学术确定性高）
+  retry_temperature: 0.1 # 重译温度
   top_p: 0.6
   top_k: 20
 

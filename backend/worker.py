@@ -49,7 +49,7 @@ def run_translation(task, dpi: int, cancel_event: threading.Event,
     try:
         import fitz
         from infer.ocr import OCREngineFactory
-        from infer.translate_v2 import SmartTranslator, merge_split_blocks, find_cross_page_pairs, split_translation, is_pseudo_title
+        from infer.translate_v2 import SmartTranslator, merge_split_blocks, find_cross_page_pairs, split_translation, is_pseudo_title, is_code_block_text
 
         doc = fitz.open(task.pdf_path)
         doc_len = len(doc)
@@ -89,30 +89,27 @@ def run_translation(task, dpi: int, cancel_event: threading.Event,
                 model_path=ocr_cfg.get('model_path'),
                 mmproj_path=ocr_cfg.get('mmproj_path'),
                 n_gpu_layers=get('gpu', 'ocr_layers', default=99),
-                n_ctx=get('ocr', 'n_ctx', default=8192))
+                n_ctx=get('ocr', 'n_ctx', default=8192),
+                flash_attn=get('ocr', 'flash_attn', default=True))
 
-            for page_num in range(s_page, e_page):
+            # 异步双缓冲流水线：GPU 进行当前页 OCR 时，后台独立线程全重叠预渲染下一页
+            ocr_stream = ocr.recognize_pdf_stream(
+                doc,
+                page_range=range(s_page, e_page),
+                dpi=dpi,
+                max_tokens=get('ocr', 'max_tokens', default=4096),
+                cancel_event=cancel_event,
+                penalty_last_n=get('ocr', 'penalty_last_n', default=256),
+                penalty_repeat=get('ocr', 'penalty_repeat', default=1.20),
+                penalty_freq=get('ocr', 'penalty_freq', default=0.20),
+                penalty_present=get('ocr', 'penalty_present', default=0.05),
+                fast_greedy=get('ocr', 'fast_greedy', default=True),
+            )
+
+            for page_num, ocr_text, raw_page_text, img_path, pw, ph in ocr_stream:
                 if cancel_event.is_set(): raise InterruptedError("Cancelled")
-
-                # 渲染页面为 PNG
-                page = doc[page_num]
-                pix = page.get_pixmap(dpi=dpi)
-                img_path = os.path.join(tempfile.gettempdir(), f"ppt_{task_id}_p{page_num}.png")
-                pix.save(img_path)
                 img_paths.append(img_path)
 
-                # PyMuPDF 原生真实字符提取（用于双通道交叉质检）
-                raw_page_text = page.get_text("text")
-
-                # OCR 推理（传递采样防复读惩罚与长页 token 预算）
-                ocr_text = ocr.recognize_image(
-                    img_path,
-                    max_tokens=get('ocr', 'max_tokens', default=4096),
-                    penalty_last_n=get('ocr', 'penalty_last_n', default=256),
-                    penalty_repeat=get('ocr', 'penalty_repeat', default=1.20),
-                    penalty_freq=get('ocr', 'penalty_freq', default=0.20),
-                    penalty_present=get('ocr', 'penalty_present', default=0.05),
-                )
                 blocks = ocr.parse_output(ocr_text)
                 if selected_engine_id == 'unlimited':
                     blocks = merge_split_blocks(blocks)
@@ -147,7 +144,10 @@ def run_translation(task, dpi: int, cancel_event: threading.Event,
                     if bt in TEXT_TYPES or bt in PASSTHROUGH:
                         # 首页作者、机构、邮箱、版权等元数据自动标记为 passthrough 保留原文，防止误译为人名幻觉
                         is_front_matter = is_front_matter_metadata(b['text'], page_num)
-                        is_pt = (bt in PASSTHROUGH) or is_front_matter or b.get('passthrough', False)
+                        is_code = is_code_block_text(b['text'])
+                        if is_code and bt in TEXT_TYPES:
+                            bt = 'algorithm'
+                        is_pt = (bt in PASSTHROUGH) or is_front_matter or is_code or b.get('passthrough', False)
                         en = _fix_latex(b['text'])
                         page_blocks.append({
                             'page': page_num+1, 'idx': i, 'type': bt,
@@ -157,7 +157,7 @@ def run_translation(task, dpi: int, cancel_event: threading.Event,
                     elif bt in IMAGE_TYPES and b.get('bbox'):
                         try:
                             fig_idx = len(task.figures)
-                            fp = _crop(img_path, b['bbox'], pix.width, pix.height, task_id, page_num, fig_idx)
+                            fp = _crop(img_path, b['bbox'], pw, ph, task_id, page_num, fig_idx)
                             task.figures.append(fp)
                             fid = f"p{page_num}_f{fig_idx}.png"
                             page_blocks.append({
@@ -242,12 +242,13 @@ def run_translation(task, dpi: int, cancel_event: threading.Event,
                 verify=get('translation', 'verify', default=True))
 
             # 从第 0 页提取论文方向（排除 passthrough 首页元数据）
+            abstract_block = None
             if all_page_blocks:
                 first_page_text = [b for b in all_page_blocks[0]
                                    if b['type'] == 'text' and not b.get('passthrough') and not is_pseudo_title(b['en'], b['type'])]
                 if first_page_text:
-                    abstract = max(first_page_text, key=lambda b: len(b['en']))
-                    translator.set_direction_from_abstract(abstract['en'])
+                    abstract_block = max(first_page_text, key=lambda b: len(b['en']))
+                    translator.set_direction_from_abstract(abstract_block['en'])
 
             consumed_blocks = set()
             for ba, bb in cross_page_pairs:
@@ -329,8 +330,27 @@ def run_translation(task, dpi: int, cancel_event: threading.Event,
                 "failed": translator.stats['failed'],
                 "skipped": translator.stats['skipped'],
             }
+            # 提炼论文四维核心导读 (Paper TL;DR)
+            tldr = {}
+            if abstract_block and abstract_block.get('zh'):
+                try:
+                    tldr = translator.generate_paper_tldr(abstract_block['zh'])
+                except Exception as e:
+                    print(f"  [Worker] LLM TL;DR generation failed: {e}")
+            if not tldr or not any(tldr.values()):
+                try:
+                    from backend.tldr_extractor import extract_paper_tldr_from_blocks
+                    all_blocks_flat = [b for pb in all_page_blocks for b in pb]
+                    tldr = extract_paper_tldr_from_blocks(all_blocks_flat)
+                except Exception as e:
+                    print(f"  [Worker] Structural TL;DR extraction failed: {e}")
+
+            if tldr and any(tldr.values()):
+                task.tldr = tldr
+                _emit(task_id, {"type": "tldr", "tldr": tldr})
+
             _emit(task_id, {"type": "complete", "quality": task.quality})
-            task_manager.update(task_id, status="completed", quality=task.quality)
+            task_manager.update(task_id, status="completed", quality=task.quality, tldr=tldr)
             task_manager.save_task(task_id)
 
         finally:
