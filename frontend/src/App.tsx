@@ -151,14 +151,41 @@ export default function App() {
 
   /* ── 加载历史记录与可用 OCR 模型 ── */
   useEffect(() => {
-    listHistory().then(setHistory).catch(() => {});
-    getOcrModels().then(models => {
-      if (models && models.length > 0) {
-        setOcrModels(models);
-        const def = models.find(m => m.is_default);
-        if (def) setSelectedOcrModel(def.id);
-      }
-    }).catch(() => {});
+    let retries = 0;
+    let timer: any = null;
+
+    const loadInitialData = () => {
+      listHistory()
+        .then(data => {
+          if (data && data.length > 0) {
+            setHistory(data);
+          } else if (retries < 5) {
+            retries++;
+            timer = setTimeout(loadInitialData, 1500);
+          }
+        })
+        .catch(() => {
+          if (retries < 5) {
+            retries++;
+            timer = setTimeout(loadInitialData, 1500);
+          }
+        });
+
+      getOcrModels()
+        .then(models => {
+          if (models && models.length > 0) {
+            setOcrModels(models);
+            const def = models.find(m => m.is_default);
+            if (def) setSelectedOcrModel(def.id);
+          }
+        })
+        .catch(() => {});
+    };
+
+    loadInitialData();
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
   }, []);
 
   const loadHistory = async (taskId: string) => {

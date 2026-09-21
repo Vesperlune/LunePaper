@@ -1,36 +1,65 @@
 @echo off
-chcp 65001 >nul
-title LunePaper å¯åŠ¨å™¨
+cd /d "%~dp0"
+title ÔÂ¶Á (LunePaper) Æô¶¯Æ÷
 
 echo ========================================================
-echo             æœˆè¯» (LunePaper) ä¸€é”®å¯åŠ¨è„šæœ¬
+echo             ÔÂ¶Á (LunePaper) Ò»¼üÆô¶¯½Å±¾
 echo ========================================================
+echo.
 
-set PYTHON_EXE=python
-where python >nul 2>nul
-if %errorlevel% neq 0 (
-    if exist "D:\miniconda\envs\py3.10\python.exe" (
-        set PYTHON_EXE=D:\miniconda\envs\py3.10\python.exe
-    )
+REM 1. ²éÕÒ¿ÉÓÃ Python ½âÊÍÆ÷ (ÓÅÏÈ LunePaper ×¨ÓÃ conda »·¾³)
+set "PYTHON_EXE="
+if exist "D:\miniconda\envs\py3.10\python.exe" (
+    set "PYTHON_EXE=D:\miniconda\envs\py3.10\python.exe"
 ) else (
-    REM Check if default python has fastapi
-    python -c "import fastapi" >nul 2>nul
-    if %errorlevel% neq 0 (
-        if exist "D:\miniconda\envs\py3.10\python.exe" (
-            set PYTHON_EXE=D:\miniconda\envs\py3.10\python.exe
-        )
+    where python >nul 2>nul
+    if not errorlevel 1 (
+        set "PYTHON_EXE=python"
     )
 )
 
-echo [*] ä½¿ç”¨ Python è§£é‡Šå™¨: %PYTHON_EXE%
-echo [*] [1/2] æ­£åœ¨å¯åŠ¨åŽç«¯æœåŠ¡ (http://localhost:7860)...
-start "LunePaper Backend" cmd /k "%PYTHON_EXE% backend/main.py"
+if "%PYTHON_EXE%"=="" (
+    echo [´íÎó] Î´¼ì²âµ½¿ÉÓÃµÄ Python »·¾³£¬ÇëÈ·ÈÏÒÑ°²×° Python ²¢ÅäÖÃ»·¾³±äÁ¿£¡
+    pause
+    exit /b 1
+)
 
-echo [*] [2/2] æ­£åœ¨å¯åŠ¨å‰ç«¯æœåŠ¡ (http://localhost:5173)...
-start "LunePaper Frontend" cmd /k "cd frontend && npm run dev"
+echo [*] Ê¹ÓÃ Python ½âÊÍÆ÷: %PYTHON_EXE%
 
+REM 2. ¼ì²é±¾µØÀúÊ·ÈÎÎñ¼ÇÂ¼
+if exist "history" (
+    for /f %%c in ('dir /b /ad history ^| find /c /v ""') do (
+        echo [*] ¼ì²âµ½±¾µØÒÑ´æ´¢µÄ·­ÒëÀúÊ·: %%c Æª
+    )
+)
+
+REM 3. Æô¶¯ºó¶Ë·þÎñ [¶Ë¿Ú 7860]
+netstat -ano | findstr ":7860" | findstr "LISTENING" >nul 2>nul
+if not errorlevel 1 (
+    echo [*] ºó¶Ë·þÎñÒÑÔÚ¶Ë¿Ú 7860 ÔËÐÐÖÐ£¬ÎÞÐèÖØ¸´Æô¶¯¡£
+) else (
+    echo [*] [1/2] ÕýÔÚÆô¶¯ºó¶Ë·þÎñ http://localhost:7860 ...
+    start "ÔÂ¶Á - ºó¶Ë·þÎñ" cmd /k "title ÔÂ¶Á - ºó¶Ë·þÎñ [Port 7860] & cd /d "%~dp0" & "%PYTHON_EXE%" backend/main.py"
+)
+
+REM 4. Æô¶¯Ç°¶Ë·þÎñ [¶Ë¿Ú 5173]
+netstat -ano | findstr ":5173" | findstr "LISTENING" >nul 2>nul
+if not errorlevel 1 (
+    echo [*] Ç°¶Ë·þÎñÒÑÔÚ¶Ë¿Ú 5173 ÔËÐÐÖÐ£¬ÎÞÐèÖØ¸´Æô¶¯¡£
+) else (
+    echo [*] [2/2] ÕýÔÚÆô¶¯Ç°¶Ë·þÎñ http://localhost:5173 ...
+    start "ÔÂ¶Á - Ç°¶Ë½çÃæ" cmd /k "title ÔÂ¶Á - Ç°¶Ë½çÃæ [Port 5173] & cd /d "%~dp0frontend" & npm run dev"
+)
+
+echo.
 echo ========================================================
-echo  æœˆè¯»å·²åœ¨åŽå°å¯åŠ¨ï¼
-echo  - å‰ç«¯ç•Œé¢: http://localhost:5173
-echo  - åŽç«¯æŽ¥å£: http://localhost:7860
+echo  ÔÂ¶ÁÒÑÔÚºóÌ¨Æô¶¯£¡
+echo  - Ç°¶Ë½çÃæ: http://localhost:5173
+echo  - ºó¶Ë½Ó¿Ú: http://localhost:7860
 echo ========================================================
+echo.
+echo [*] ÕýÔÚ´ò¿ªä¯ÀÀÆ÷·ÃÎÊÔÂ¶ÁÏµÍ³...
+ping 127.0.0.1 -n 4 >nul
+start http://localhost:5173
+
+exit /b 0
