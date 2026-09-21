@@ -1,7 +1,4 @@
-import { useState, useCallback, useRef, useEffect, memo, type ReactNode } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkMath from 'remark-math';
-import rehypeKatex from 'rehype-katex';
+import { useState, useCallback, useRef, useEffect, memo, useMemo, type ReactNode } from 'react';
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
 import {
@@ -10,6 +7,23 @@ import {
   type HistoryItem, type OcrModelInfo
 } from './api';
 import { useWebSocket } from './hooks/useWebSocket';
+import React from 'react';
+import { buildReferenceIndex } from './utils/referenceParser';
+import { buildGlobalVariableIndex } from './utils/variableExtractor';
+import { InteractiveText } from './components/InteractiveText';
+import { EquationCard } from './components/EquationCard';
+import { PaperTLDRCard } from './components/PaperTLDRCard';
+import { VariableInspectorDrawer } from './components/VariableInspectorDrawer';
+import { CodeCard } from './components/CodeCard';
+import {
+  isCodeBlock,
+  isCodeCaption,
+  isCodeStart,
+  isSectionHeading,
+  matchCodeCaption,
+} from './utils/codeDetector';
+import { sanitizeLatexMath } from './utils/latexSanitizer';
+import type { ReferenceItem, PaperTLDR } from './types';
 
 type AppMode = 'upload' | 'translating' | 'done';
 interface TaskInfo {
@@ -129,6 +143,9 @@ export default function App() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [selectedOcrModel, setSelectedOcrModel] = useState<string>('unlimited');
   const [ocrModels, setOcrModels] = useState<OcrModelInfo[]>([]);
+  const [tldr, setTldr] = useState<PaperTLDR | null>(null);
+  const [isTLDRLoading, setIsTLDRLoading] = useState(false);
+  const [isVarDrawerOpen, setIsVarDrawerOpen] = useState(false);
   const blocksRef = useRef<BlockData[]>([]);
   const mainRef = useRef<HTMLDivElement>(null);
 
@@ -153,6 +170,24 @@ export default function App() {
       setCurrentPage(data.page_count);
       setBlocks(data.blocks || []);
       blocksRef.current = data.blocks || [];
+      if (data.tldr && Object.keys(data.tldr).length > 0) {
+        setTldr(data.tldr);
+        setIsTLDRLoading(false);
+      } else {
+        setTldr(null);
+        setIsTLDRLoading(true);
+        fetch(`http://localhost:7860/api/task/${taskId}/tldr`)
+          .then(res => res.json())
+          .then(resData => {
+            if (resData?.tldr && Object.keys(resData.tldr).length > 0) {
+              setTldr(resData.tldr);
+            }
+          })
+          .catch(() => {})
+          .finally(() => {
+            setIsTLDRLoading(false);
+          });
+      }
       setMode('done');
       setLocked(true);
     } catch (e: unknown) {
@@ -198,6 +233,7 @@ export default function App() {
     setCurrentPage(0); setTotalPages(0); setError('');
     setLocked(false); blocksRef.current = [];
     setPhase('ocr'); setOcrPage(0); setTransDone(0); setTransTotal(0);
+    setTldr(null); setIsTLDRLoading(false); setIsVarDrawerOpen(false);
   };
 
   const onWsEvent = useCallback((e: Record<string, unknown>) => {
@@ -208,10 +244,20 @@ export default function App() {
           setTask(prev => prev ? { ...prev, ocr_model: e.ocr_model as string } : prev);
         }
         break;
-      case 'phase':
-        setPhase(e.phase as 'ocr' | 'translate');
+      case 'phase': {
+        const ph = e.phase as 'ocr' | 'translate';
+        setPhase(ph);
+        if (ph === 'translate') setIsTLDRLoading(true);
         if (e.total_blocks) setTransTotal(e.total_blocks as number);
         break;
+      }
+      case 'tldr': {
+        if (e.tldr) {
+          setTldr(e.tldr as PaperTLDR);
+          setIsTLDRLoading(false);
+        }
+        break;
+      }
       case 'ocr_progress':
         setOcrPage(e.page as number);
         setCurrentPage(e.page as number);
@@ -290,6 +336,7 @@ export default function App() {
       }
       case 'complete': {
         setMode('done');
+        setIsTLDRLoading(false);
         const q = (e.quality as { total_blocks: number; pass_rate: string }) || null;
         setTask(prev => prev ? {
           ...prev,
@@ -298,7 +345,11 @@ export default function App() {
         } : prev);
         break;
       }
-      case 'error': setError(e.message as string); break;
+      case 'error': {
+        setError(e.message as string);
+        setIsTLDRLoading(false);
+        break;
+      }
     }
   }, []);
 
@@ -316,11 +367,65 @@ export default function App() {
     return () => observer.disconnect();
   }, [blocks.length, mode]);
 
-  const scrollToPage = (page: number) => {
+  const scrollToPage = useCallback((page: number) => {
     setActivePage(page);
     const el = mainRef.current?.querySelector(`[data-page="${page}"]`);
     el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  };
+  }, []);
+
+  const refIndex = useMemo(() => buildReferenceIndex(blocks), [blocks]);
+  const globalVariables = useMemo(() => buildGlobalVariableIndex(blocks), [blocks]);
+
+  const handleJumpToEquation = useCallback((page: number, blockIdx: number) => {
+    setActivePage(page);
+    const el = document.getElementById(`eq-item-p${page}-i${blockIdx}`);
+    if (el) {
+      const rect = el.getBoundingClientRect();
+      const top = window.pageYOffset + rect.top - 120;
+      window.scrollTo({ top, behavior: 'smooth' });
+      el.classList.add('ref-glow-pulse');
+      setTimeout(() => el.classList.remove('ref-glow-pulse'), 2500);
+    } else {
+      scrollToPage(page);
+      setTimeout(() => {
+        const elRetry = document.getElementById(`eq-item-p${page}-i${blockIdx}`);
+        if (elRetry) {
+          const rect = elRetry.getBoundingClientRect();
+          const top = window.pageYOffset + rect.top - 120;
+          window.scrollTo({ top, behavior: 'smooth' });
+          elRetry.classList.add('ref-glow-pulse');
+          setTimeout(() => elRetry.classList.remove('ref-glow-pulse'), 2500);
+        }
+      }, 350);
+    }
+  }, [scrollToPage]);
+
+  const handleJumpToReference = useCallback((id: string, page?: number) => {
+    const targetPage = page || (refIndex[id]?.page);
+    if (targetPage) {
+      setActivePage(targetPage);
+    }
+    const el = document.getElementById(`ref-item-${id}`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      el.classList.add('ref-glow-pulse');
+      setTimeout(() => el.classList.remove('ref-glow-pulse'), 2500);
+    } else if (targetPage) {
+      scrollToPage(targetPage);
+      setTimeout(() => {
+        const elRetry = document.getElementById(`ref-item-${id}`);
+        if (elRetry) {
+          elRetry.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          elRetry.classList.add('ref-glow-pulse');
+          setTimeout(() => elRetry.classList.remove('ref-glow-pulse'), 2500);
+        }
+      }, 350);
+    }
+  }, [scrollToPage, refIndex]);
+
+  const handleOpenVariableInspector = useCallback(() => {
+    setIsVarDrawerOpen(true);
+  }, []);
 
   const handleUpload = async (file: File) => {
     setError('');
@@ -340,7 +445,7 @@ export default function App() {
   return (
     <div className="min-h-screen">
       {/* ── Header ── */}
-      <header className="sticky top-0 z-50 border-b border-white/30 bg-white/40 backdrop-blur-[50px] saturate-[1.8] shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]">
+      <header className="sticky top-0 z-50 border-b border-white/50 bg-white/55 backdrop-blur-[45px] saturate-[1.85] shadow-[0_4px_24px_-4px_rgba(139,127,199,0.1),inset_0_1.5px_0_rgba(255,255,255,0.9)]">
         <div className="max-w-[95rem] mx-auto px-6 py-1 flex items-end justify-between">
           <div className="flex items-end gap-2.5">
             <img src="/logo.jpg" alt="logo" className="w-20 h-20 rounded-full object-cover border-2 border-white/60 shadow-sm -mb-8" />
@@ -350,19 +455,19 @@ export default function App() {
           <div className="flex items-center gap-3">
             {task && mode !== 'upload' && (
               <>
-                <span className="text-gray-400 flex items-center gap-1.5 text-sm"><IconFile />{task.filename}</span>
+                <span className="text-gray-500 flex items-center gap-1.5 text-sm"><IconFile />{task.filename}</span>
                 <span className="text-gray-300">·</span>
-                <span className="text-gray-400 text-sm">{task.page_count} 页</span>
+                <span className="text-gray-500 text-sm">{task.page_count} 页</span>
                 {task.ocr_model && (
                   <>
                     <span className="text-gray-300">·</span>
-                    <span className="text-violet-600 font-medium text-xs bg-violet-50/80 border border-violet-200/50 px-2 py-0.5 rounded-full">
+                    <span className="text-violet-700 font-medium text-xs liquid-glass-pill px-2.5 py-0.5 rounded-full">
                       {task.ocr_model === 'ovis' ? 'OvisOCR2' : 'Unlimited-OCR'}
                     </span>
                   </>
                 )}
                 {mode === 'done' && (
-                  <span className="inline-flex items-center gap-1 text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full text-xs font-medium">
+                  <span className="inline-flex items-center gap-1 text-emerald-700 bg-emerald-100/80 border border-emerald-200/60 shadow-2xs px-2.5 py-0.5 rounded-full text-xs font-medium">
                     <IconCheck /> 完成
                   </span>
                 )}
@@ -374,10 +479,10 @@ export default function App() {
               <button
                 onClick={() => setLocked(l => !l)}
                 title={locked ? '已保护 · 刷新将提示确认' : '未保护 · 刷新将丢失内容'}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium transition-all cursor-pointer
                   ${locked
-                    ? 'bg-violet-50 text-violet-600 hover:bg-violet-100'
-                    : 'bg-gray-100 text-gray-400 hover:bg-gray-200 hover:text-gray-500'
+                    ? 'bg-violet-100/90 text-violet-700 border border-violet-200/80 shadow-2xs'
+                    : 'liquid-glass-pill text-gray-500 hover:text-gray-700'
                   }`}
               >
                 {locked ? <IconLock /> : <IconUnlock />}
@@ -390,16 +495,36 @@ export default function App() {
               <button
                 onClick={() => setCompareMode(c => !c)}
                 title={compareMode ? '关闭 PDF 对照' : '开启 PDF 对照'}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium transition-all cursor-pointer
                   ${compareMode
-                    ? 'bg-violet-50 text-violet-600 hover:bg-violet-100'
-                    : 'bg-gray-100 text-gray-400 hover:bg-gray-200 hover:text-gray-500'
+                    ? 'bg-violet-100/90 text-violet-700 border border-violet-200/80 shadow-2xs'
+                    : 'liquid-glass-pill text-gray-500 hover:text-gray-700'
                   }`}
               >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <rect x="2" y="3" width="20" height="18" rx="2" /><line x1="12" y1="3" x2="12" y2="21" />
                 </svg>
                 对照
+              </button>
+            )}
+
+            {/* ── 符号字典按钮 ── */}
+            {mode !== 'upload' && globalVariables.length > 0 && (
+              <button
+                type="button"
+                onClick={handleOpenVariableInspector}
+                title="打开全篇数学公式变量字典与符号追踪抽屉"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium liquid-glass-pill text-violet-800 hover:bg-violet-100/90 transition-all cursor-pointer"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-violet-600">
+                  <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5Z" />
+                  <path d="M6 10h10" />
+                  <path d="M6 14h10" />
+                </svg>
+                <span>符号字典</span>
+                <span className="text-[10px] font-bold px-1.5 py-0.2 rounded-full bg-violet-100/80 text-violet-700">
+                  {globalVariables.length}
+                </span>
               </button>
             )}
           </div>
@@ -426,31 +551,31 @@ export default function App() {
           {/* Progress — two phases: OCR then Translate */}
           {/* Progress — two phases: OCR then Translate (Sticky top-14) */}
           {mode === 'translating' && (
-            <div className="sticky top-14 z-40 mb-5 glass-card animate-fade-in-up rounded-2xl px-5 py-3.5 backdrop-blur-[35px] bg-white/80 border border-white/60 shadow-[0_4px_20px_rgba(139,127,199,0.12)]">
+            <div className="sticky top-14 z-40 mb-5 liquid-glass-card animate-fade-in-up rounded-2xl px-5 py-3.5">
               <div className="flex items-center justify-between gap-5">
                 <div className="flex-1">
                   {phase === 'ocr' ? (
                     /* ── OCR 阶段 ── */
                     <>
                       <div className="flex justify-between text-sm mb-2">
-                        <span className="text-gray-500 flex items-center gap-2">
+                        <span className="text-gray-600 flex items-center gap-2 font-medium">
                           <span className="relative flex h-2.5 w-2.5">
                             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-violet-400 opacity-75" />
                             <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-violet-500" />
                           </span>
                           OCR 识别中...
                         </span>
-                        <span className="text-gray-400 font-medium tabular-nums">
+                        <span className="text-gray-500 font-medium tabular-nums">
                           {ocrPage} / {totalPages} 页
-                          <span className="ml-2 text-violet-500 font-semibold">
+                          <span className="ml-2 text-violet-600 font-semibold">
                             {totalPages > 0 ? Math.round((ocrPage / totalPages) * 100) : 0}%
                           </span>
                         </span>
                       </div>
-                      <div className="h-2.5 bg-gray-100/60 rounded-full overflow-hidden relative">
+                      <div className="h-2.5 bg-violet-100/40 rounded-full overflow-hidden relative shadow-inner">
                         <div className="h-full rounded-full transition-all duration-500 ease-out progress-stripe relative"
                              style={{ width: `${totalPages > 0 ? (ocrPage / totalPages) * 100 : 0}%`,
-                                      background: 'linear-gradient(90deg, #8b7fc7, #a89cc8)' }}>
+                                      background: 'linear-gradient(90deg, #7c6cb8, #9b8ec4)' }}>
                           <div className="absolute right-0 top-1/2 -translate-y-1/2 w-3 h-3 bg-white rounded-full shadow-md border-2 border-violet-400" />
                         </div>
                       </div>
@@ -459,24 +584,24 @@ export default function App() {
                     /* ── 翻译阶段 ── */
                     <>
                       <div className="flex justify-between text-sm mb-2">
-                        <span className="text-gray-500 flex items-center gap-2">
+                        <span className="text-gray-600 flex items-center gap-2 font-medium">
                           <span className="relative flex h-2.5 w-2.5">
                             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-violet-400 opacity-75" />
                             <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-violet-500" />
                           </span>
                           翻译中...
                         </span>
-                        <span className="text-gray-400 font-medium tabular-nums">
+                        <span className="text-gray-500 font-medium tabular-nums">
                           {transDone} / {transTotal} 块
-                          <span className="ml-2 text-violet-500 font-semibold">
+                          <span className="ml-2 text-violet-600 font-semibold">
                             {transTotal > 0 ? Math.round((transDone / transTotal) * 100) : 0}%
                           </span>
                         </span>
                       </div>
-                      <div className="h-2.5 bg-gray-100/60 rounded-full overflow-hidden relative">
+                      <div className="h-2.5 bg-violet-100/40 rounded-full overflow-hidden relative shadow-inner">
                         <div className="h-full rounded-full transition-all duration-500 ease-out progress-stripe relative"
                              style={{ width: `${transTotal > 0 ? (transDone / transTotal) * 100 : 0}%`,
-                                      background: 'linear-gradient(90deg, #8b7fc7, #a89cc8)' }}>
+                                      background: 'linear-gradient(90deg, #7c6cb8, #9b8ec4)' }}>
                           <div className="absolute right-0 top-1/2 -translate-y-1/2 w-3 h-3 bg-white rounded-full shadow-md border-2 border-violet-400" />
                         </div>
                       </div>
@@ -492,7 +617,7 @@ export default function App() {
                       clear();
                     }
                   }}
-                  className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-rose-500 hover:text-rose-600 bg-rose-50/80 hover:bg-rose-100 rounded-lg transition-all border border-rose-200/50 shadow-sm hover:shadow active:scale-95"
+                  className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-rose-600 hover:text-rose-700 bg-rose-50/90 hover:bg-rose-100 rounded-xl transition-all border border-rose-200/60 shadow-2xs cursor-pointer active:scale-95"
                   title="取消当前翻译任务并释放 GPU 显存"
                 >
                   <IconClose /> 取消任务
@@ -501,11 +626,11 @@ export default function App() {
             </div>
           )}
 
-          {/* Done bar with Interactive Page Seeking Slider (Sticky top-14) */}
+          {/* Done bar with Interactive Page Seeking Slider (Sticky top-14 with Liquid Glass 2.0) */}
           {mode === 'done' && (
-            <div className="sticky top-14 z-40 mb-5 glass-card animate-fade-in-up rounded-2xl px-5 py-3 backdrop-blur-[35px] bg-white/85 border border-white/60 shadow-[0_4px_20px_rgba(139,127,199,0.12)] flex items-center gap-4">
+            <div className="sticky top-14 z-40 mb-5 liquid-glass-card animate-fade-in-up rounded-2xl px-5 py-3 flex items-center gap-4">
               <div className="flex-1 flex items-center gap-3 min-w-0">
-                <span className="text-xs font-semibold text-violet-700 bg-violet-100/80 border border-violet-200/80 px-2.5 py-1 rounded-full whitespace-nowrap shadow-xs">
+                <span className="text-xs font-semibold text-violet-800 liquid-glass-pill px-3 py-1 rounded-full whitespace-nowrap shadow-xs">
                   第 {activePage} / {totalPages || task?.page_count || 1} 页
                 </span>
                 <input
@@ -514,21 +639,22 @@ export default function App() {
                   max={totalPages || task?.page_count || 1}
                   value={activePage}
                   onChange={(e) => scrollToPage(Number(e.target.value))}
-                  className="flex-1 h-2 bg-violet-100 rounded-lg appearance-none cursor-pointer accent-violet-600 hover:accent-violet-700 transition-all"
+                  className="flex-1 h-2 bg-violet-100/90 rounded-lg appearance-none cursor-pointer accent-violet-600 hover:accent-violet-700 transition-all"
                   title="滑动快速调节当前阅读页码"
                 />
               </div>
-              <span className="text-xs text-gray-400 whitespace-nowrap hidden sm:inline">
+              <span className="text-xs text-gray-500 whitespace-nowrap hidden sm:inline font-medium">
                 {task?.quality?.total_blocks ?? blocks.length} 个内容块
               </span>
               <button onClick={() => window.open(getDownloadUrl(task!.task_id))}
-                className="inline-flex items-center gap-1.5 px-4 py-2 text-white rounded-lg text-xs font-medium
-                           transition-all hover:shadow-md hover:shadow-violet-200 hover:-translate-y-0.5 active:translate-y-0 shrink-0"
-                style={{ background: 'linear-gradient(135deg, #8b7fc7, #a89cc8)' }}>
-                <IconDownload /> 下载 HTML
+                title="下载双语 Markdown 与配图压缩包 (ZIP)"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-white rounded-xl text-xs font-semibold
+                           transition-all hover:shadow-md hover:shadow-violet-300/40 hover:-translate-y-0.5 active:translate-y-0 shrink-0 cursor-pointer"
+                style={{ background: 'linear-gradient(135deg, #7c6cb8, #9b8ec4)' }}>
+                <IconDownload /> 下载 ZIP
               </button>
               <button onClick={() => { if (locked) { if (!confirm('确定要开始新任务吗？当前翻译内容将丢失。')) return; } clear(); }}
-                className="inline-flex items-center gap-1.5 px-3 py-2 text-gray-600 bg-white/70 backdrop-blur-sm border border-gray-200/60 rounded-lg text-xs font-medium hover:bg-white transition-all shadow-xs shrink-0">
+                className="inline-flex items-center gap-1.5 px-3 py-2 text-gray-700 liquid-glass-pill rounded-xl text-xs font-medium hover:text-violet-800 transition-all cursor-pointer shrink-0">
                 <IconRefresh /> 新任务
               </button>
             </div>
@@ -560,7 +686,16 @@ export default function App() {
 
             {/* 主内容区（翻译） */}
             <div ref={mainRef} className={`min-w-0 ${compareMode ? 'w-3/5' : 'flex-1'}`}>
-              <Preview blocks={blocks} taskId={task?.task_id ?? ''} phase={phase} />
+              <Preview
+                blocks={blocks}
+                taskId={task?.task_id ?? ''}
+                phase={phase}
+                refIndex={refIndex}
+                onJumpToReference={handleJumpToReference}
+                tldr={tldr}
+                isTLDRLoading={isTLDRLoading}
+                onOpenVariableInspector={handleOpenVariableInspector}
+              />
             </div>
 
             {/* 右侧 PDF 对照面板 */}
@@ -597,6 +732,14 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* ── 全篇公式变量全局追踪侧边抽屉 ── */}
+      <VariableInspectorDrawer
+        isOpen={isVarDrawerOpen}
+        onClose={() => setIsVarDrawerOpen(false)}
+        variables={globalVariables}
+        onJumpToEquation={handleJumpToEquation}
+      />
     </div>
   );
 }
@@ -675,10 +818,10 @@ function UploadView({
         </div>
 
         {/* ── OCR 底座选择卡片 ── */}
-        <div className="mb-4 bg-white/70 backdrop-blur-md border border-white/50 rounded-2xl p-3 shadow-sm flex flex-col gap-2">
+        <div className="mb-4 liquid-glass-card rounded-2xl p-4 shadow-sm flex flex-col gap-2.5">
           <div className="flex items-center justify-between px-1">
-            <span className="text-xs font-semibold text-gray-600 flex items-center gap-1.5">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-violet-500">
+            <span className="text-xs font-semibold text-gray-700 flex items-center gap-1.5">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-violet-600">
                 <rect x="2" y="3" width="20" height="14" rx="2" /><line x1="8" y1="21" x2="16" y2="21" /><line x1="12" y1="17" x2="12" y2="21" />
               </svg>
               OCR 底座引擎选择:
@@ -688,20 +831,20 @@ function UploadView({
             </span>
           </div>
 
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-2 gap-2.5">
             <button
               type="button"
               disabled={!isUnlimitedAvailable}
               onClick={() => onSelectOcrModel('unlimited')}
-              className={`px-3 py-2.5 rounded-xl text-left transition-all border ${
+              className={`px-3.5 py-2.5 rounded-xl text-left transition-all border ${
                 selectedOcrModel === 'unlimited'
-                  ? 'bg-violet-50/90 border-violet-300 ring-2 ring-violet-400/30 shadow-sm'
-                  : 'bg-white/50 border-gray-100 hover:bg-white/80 hover:border-violet-100 text-gray-600'
-              } ${!isUnlimitedAvailable ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  ? 'liquid-glass-pill bg-violet-100/80 border-violet-300 ring-2 ring-violet-400/40 shadow-xs'
+                  : 'bg-white/50 border-white/60 hover:bg-white/80 hover:border-violet-200 text-gray-600'
+              } ${!isUnlimitedAvailable ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
             >
               <div className="flex items-center justify-between">
                 <span className="text-xs font-bold text-gray-800">Unlimited-OCR</span>
-                <span className="text-[10px] font-semibold text-violet-600 bg-violet-100/70 px-1.5 py-0.5 rounded">3B MoE</span>
+                <span className="text-[10px] font-semibold text-violet-700 bg-violet-100/90 px-1.5 py-0.5 rounded border border-violet-200/60 shadow-2xs">3B MoE</span>
               </div>
               <p className="text-[11px] text-gray-500 mt-0.5 truncate font-mono">
                 {isUnlimitedAvailable ? '64×550M · Q8_0 · VRAM ~6.0G' : '未检测到模型文件'}
@@ -712,15 +855,15 @@ function UploadView({
               type="button"
               disabled={!isOvisAvailable}
               onClick={() => onSelectOcrModel('ovis')}
-              className={`px-3 py-2.5 rounded-xl text-left transition-all border ${
+              className={`px-3.5 py-2.5 rounded-xl text-left transition-all border ${
                 selectedOcrModel === 'ovis'
-                  ? 'bg-violet-50/90 border-violet-300 ring-2 ring-violet-400/30 shadow-sm'
-                  : 'bg-white/50 border-gray-100 hover:bg-white/80 hover:border-violet-100 text-gray-600'
-              } ${!isOvisAvailable ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  ? 'liquid-glass-pill bg-violet-100/80 border-violet-300 ring-2 ring-violet-400/40 shadow-xs'
+                  : 'bg-white/50 border-white/60 hover:bg-white/80 hover:border-violet-200 text-gray-600'
+              } ${!isOvisAvailable ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
             >
               <div className="flex items-center justify-between">
                 <span className="text-xs font-bold text-gray-800">OvisOCR2</span>
-                <span className="text-[10px] font-semibold text-emerald-600 bg-emerald-100/70 px-1.5 py-0.5 rounded">0.8B Dense</span>
+                <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-100/90 px-1.5 py-0.5 rounded border border-emerald-200/60 shadow-2xs">0.8B Dense</span>
               </div>
               <p className="text-[11px] text-gray-500 mt-0.5 truncate font-mono">
                 {isOvisAvailable ? '752M · Q8_0 · VRAM ~1.7G' : '未检测到模型文件'}
@@ -733,14 +876,14 @@ function UploadView({
           onDragOver={e => { e.preventDefault(); setDrag(true); }}
           onDragLeave={() => setDrag(false)}
           onDrop={e => { e.preventDefault(); setDrag(false); const f = e.dataTransfer.files[0]; if (f?.name.endsWith('.pdf')) onUpload(f); }}
-          className={`upload-zone rounded-2xl p-10 text-center cursor-pointer transition-all
-            ${drag ? 'dragging border-violet-400 bg-violet-50/50' : 'border-gray-200 hover:border-violet-300 hover:bg-violet-50/30'}`}
+          className={`upload-zone rounded-3xl p-10 text-center cursor-pointer transition-all
+            ${drag ? 'dragging' : ''}`}
           onClick={() => document.getElementById('fileInput')?.click()}>
           <div className={`mx-auto w-16 h-16 rounded-2xl flex items-center justify-center mb-4 transition-all
-            ${drag ? 'bg-violet-100 text-violet-600 scale-110' : 'bg-gray-50 text-gray-300'}`}>
+            ${drag ? 'bg-violet-100 text-violet-600 scale-110 shadow-md' : 'bg-white/70 text-violet-400 shadow-xs'}`}>
             <IconUpload />
           </div>
-          <p className="text-gray-600 text-base font-medium mb-1">{drag ? '松开以上传' : '拖拽 PDF 到此处'}</p>
+          <p className="text-gray-700 text-base font-semibold mb-1">{drag ? '松开以上传' : '拖拽 PDF 到此处'}</p>
           <p className="text-gray-400 text-sm">或点击选择文件</p>
         </div>
         <input id="fileInput" type="file" accept=".pdf" className="hidden"
@@ -764,7 +907,7 @@ function UploadView({
             <div className="space-y-2 max-h-64 overflow-y-auto sidebar-scroll pr-1">
               {history.map(item => (
                 <div key={item.task_id}
-                  className="group flex items-center gap-3 px-4 py-2.5 rounded-xl border border-white/40 bg-white/40 backdrop-blur-sm hover:bg-white/70 hover:border-violet-200 transition-all cursor-pointer"
+                  className="group flex items-center gap-3 px-4 py-2.5 rounded-xl liquid-glass-pill hover:bg-white/90 hover:border-violet-300/70 transition-all cursor-pointer shadow-2xs"
                   onClick={() => onLoadHistory(item.task_id)}>
                   <div className="flex-1 min-w-0">
                     <div className="text-sm font-medium text-gray-700 truncate">{item.filename}</div>
@@ -810,18 +953,10 @@ function UploadView({
 /* ═══════════════════════════════════════════ */
 /*  Markdown / Table renderers                */
 /* ═══════════════════════════════════════════ */
-function MdBlock({ text }: { text: string }) {
-  return (
-    <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[[rehypeKatex, { throwOnError: false }]]}
-      components={{ p: ({ children }) => <span>{children}</span> }}>
-      {text}
-    </ReactMarkdown>
-  );
-}
 
 function cleanLatexMath(latex: string): string {
   if (!latex) return '';
-  return latex
+  const pre = latex
     .replace(/&amp;/g, '&')
     .replace(/\\_\{n\}\s*u\s*m\b/g, '_{\\mathrm{num}}')
     .replace(/step_\\mathrm\{num\}/g, 'step_{\\mathrm{num}}')
@@ -830,6 +965,7 @@ function cleanLatexMath(latex: string): string {
     .replace(/-1\.\s+5/g, '-1.5')
     .replace(/\\\s+where\b/g, '\\\\ \\text{where }')
     .replace(/\.\s*\.\s*\./g, '\\dots');
+  return sanitizeLatexMath(pre);
 }
 
 function renderMathInHtml(rawHtml: string): string {
@@ -855,30 +991,6 @@ function renderMathInHtml(rawHtml: string): string {
   return res;
 }
 
-function EquationBlock({ text }: { text: string }) {
-  let clean = (text || '').trim();
-  if (clean.startsWith('$$') && clean.endsWith('$$')) {
-    clean = clean.slice(2, -2).trim();
-  } else if (clean.startsWith('\\[') && clean.endsWith('\\]')) {
-    clean = clean.slice(2, -2).trim();
-  }
-  clean = cleanLatexMath(clean);
-
-  try {
-    const html = katex.renderToString(clean, {
-      displayMode: true,
-      throwOnError: false,
-    });
-    return (
-      <div
-        className="text-center py-2 overflow-x-auto select-text"
-        dangerouslySetInnerHTML={{ __html: html }}
-      />
-    );
-  } catch {
-    return <MdBlock text={text.startsWith('$$') ? text : `$$\n${text}\n$$`} />;
-  }
-}
 
 function TableBlock({ html }: { html: string }) {
   const processed = renderMathInHtml(html);
@@ -898,12 +1010,33 @@ const IMG_BASE = 'http://localhost:7860';
 /* ═══════════════════════════════════════════ */
 /*  Preview                                   */
 /* ═══════════════════════════════════════════ */
-const BlockItem = memo(({ b, taskId }: { b: BlockData; taskId: string }) => {
+const BlockItem = memo(({
+  b,
+  taskId,
+  refIndex,
+  onJumpToReference,
+  onOpenVariableInspector,
+  prevBlock,
+  nextBlock,
+}: {
+  b: BlockData;
+  taskId: string;
+  refIndex: Record<string, ReferenceItem>;
+  onJumpToReference: (id: string, page?: number) => void;
+  onOpenVariableInspector?: () => void;
+  prevBlock?: BlockData;
+  nextBlock?: BlockData;
+}) => {
   if (b.type === 'equation') {
     return (
-      <div className="block-card mx-2 my-1.5 px-4 py-3 rounded-xl bg-gray-50/80 overflow-x-auto">
-        <EquationBlock text={b.en} />
-      </div>
+      <EquationCard
+        text={b.en}
+        page={b.page}
+        idx={b.idx}
+        contextEn={`${prevBlock?.en || ''} ${nextBlock?.en || ''}`}
+        contextZh={`${prevBlock?.zh || ''} ${nextBlock?.zh || ''}`}
+        onOpenVariableInspector={onOpenVariableInspector}
+      />
     );
   }
   if (b.type === 'table') {
@@ -929,10 +1062,12 @@ const BlockItem = memo(({ b, taskId }: { b: BlockData; taskId: string }) => {
   if (b.type === 'image_caption') {
     return (
       <div className="mx-2 my-1.5 text-center text-sm">
-        <MdBlock text={b.en} />
+        <InteractiveText text={b.en} refIndex={refIndex} onJumpToReference={onJumpToReference} />
         {b.zh && b.zh !== b.en && (
           <div className="text-gray-600 mt-1">
-            <StreamReveal textLen={b.zh.length}><MdBlock text={b.zh} /></StreamReveal>
+            <StreamReveal textLen={b.zh.length}>
+              <InteractiveText text={b.zh} refIndex={refIndex} onJumpToReference={onJumpToReference} />
+            </StreamReveal>
           </div>
         )}
       </div>
@@ -940,35 +1075,55 @@ const BlockItem = memo(({ b, taskId }: { b: BlockData; taskId: string }) => {
   }
   if (b.type === 'page_number') return null;
 
-  return (
-    <div className={`block-card mx-2 my-1.5 px-4 py-3 rounded-xl overflow-hidden
-      ${b.verified === false ? 'ring-1 ring-red-200 bg-red-50/30' : ''}`}>
+  // Extract reference number if this block is in references section
+  const refNumMatch = b.en.match(/^\s*(?:\[\s*(\d+)\s*\]|(\d+)\.\s+)/);
+  const refNum = refNumMatch ? (refNumMatch[1] || refNumMatch[2]) : undefined;
+  const refAnchorId = refNum ? `ref-item-${refNum}` : undefined;
+  const isRefBlock = b.type === 'ref_text' || !!refAnchorId;
+  const isPrimaryTitle = b.type === 'title' && b.page === 1;
 
-      {b.type !== 'text' && (
-        <span className="inline-block text-[10px] font-semibold uppercase tracking-wider text-violet-500 bg-violet-50 px-2 py-0.5 rounded mb-2">
-          {b.type}
-        </span>
+  return (
+    <div
+      id={refAnchorId}
+      className={`block-card mx-2 my-1.5 px-4 py-3 rounded-xl overflow-hidden transition-all duration-300 scroll-mt-36
+        ${isPrimaryTitle ? 'text-center py-5 my-2.5 bg-white/95 shadow-sm border border-violet-100/70' : ''}
+        ${b.type === 'ref_text' ? 'bg-gray-50/70 border-gray-100/90' : ''}
+        ${b.verified === false ? 'ring-1 ring-red-200 bg-red-50/30' : ''}`}
+    >
+      {b.type !== 'text' && !isPrimaryTitle && (
+        <div className="flex items-center gap-1.5 mb-2">
+          <span className="inline-block text-[10px] font-semibold uppercase tracking-wider text-violet-500 bg-violet-50 px-2 py-0.5 rounded">
+            {b.type === 'ref_text' ? 'Reference' : b.type}
+          </span>
+          {refNum && (
+            <span className="font-mono text-[10px] font-bold text-violet-700 bg-violet-100/80 px-1.5 py-0.2 rounded">
+              [{refNum}]
+            </span>
+          )}
+        </div>
       )}
 
       {b.zh === b.en ? (
         /* Passthrough: 只显示一次，原文样式 */
-        <div className={`${b.type === 'title' ? 'text-lg font-semibold' : 'text-sm'} text-gray-700 leading-relaxed break-words overflow-hidden`}>
-          <MdBlock text={b.en} />
+        <div className={`${isPrimaryTitle ? 'text-xl sm:text-2xl font-bold tracking-tight text-gray-900 leading-snug' : b.type === 'title' ? 'text-lg font-semibold text-gray-800' : 'text-sm text-gray-700'} leading-relaxed break-words overflow-hidden`}>
+          <InteractiveText text={b.en} refIndex={refIndex} onJumpToReference={onJumpToReference} isRefBlock={isRefBlock} />
         </div>
       ) : (
         <>
           {/* English */}
-          <div className={`${b.type === 'title' ? 'text-lg font-semibold' : 'text-sm'} ${b.type === 'title' ? 'text-gray-600' : 'text-gray-400'} leading-relaxed pb-2 italic break-words overflow-hidden`}>
-            <MdBlock text={b.en} />
+          <div className={`${isPrimaryTitle ? 'text-xl sm:text-2xl font-bold tracking-tight text-gray-900 leading-snug pb-1' : b.type === 'title' ? 'text-lg font-semibold text-gray-600 pb-1' : 'text-sm text-gray-400 pb-2 italic'} leading-relaxed break-words overflow-hidden`}>
+            <InteractiveText text={b.en} refIndex={refIndex} onJumpToReference={onJumpToReference} isRefBlock={isRefBlock} />
           </div>
 
           {/* Separator */}
-          <div className="h-px bg-gradient-to-r from-violet-100 via-violet-50 to-transparent my-1" />
+          <div className={`h-px bg-gradient-to-r from-violet-100 via-violet-50 to-transparent my-1 ${isPrimaryTitle ? 'w-2/3 mx-auto from-transparent via-violet-200 to-transparent my-2' : ''}`} />
 
           {/* Chinese — CSS 揭示动画，保留 KaTeX 渲染 */}
-          <div className={`${b.type === 'title' ? 'text-lg font-semibold' : 'text-[15px]'} text-gray-800 leading-relaxed break-words overflow-hidden`}>
+          <div className={`${isPrimaryTitle ? 'text-lg sm:text-xl font-semibold text-violet-950 leading-snug' : b.type === 'title' ? 'text-lg font-semibold text-gray-800' : 'text-[15px] text-gray-800'} leading-relaxed break-words overflow-hidden`}>
             {b.zh ? (
-              <StreamReveal textLen={b.zh.length}><MdBlock text={b.zh} /></StreamReveal>
+              <StreamReveal textLen={b.zh.length}>
+                <InteractiveText text={b.zh} refIndex={refIndex} onJumpToReference={onJumpToReference} isRefBlock={isRefBlock} />
+              </StreamReveal>
             ) : (
               <span className="text-violet-400/80 italic animate-pulse-soft text-xs inline-flex items-center gap-1.5 py-0.5">
                 <span className="inline-block w-1.5 h-1.5 rounded-full bg-violet-400 animate-ping" />
@@ -988,8 +1143,588 @@ const BlockItem = memo(({ b, taskId }: { b: BlockData; taskId: string }) => {
   );
 });
 
-function Preview({ blocks, taskId, phase }: { blocks: BlockData[]; taskId: string; phase?: string }) {
+/* ════════════════════════════════════════════════════════════════
+   Generalized Academic Header & Author Showcase System
+   ════════════════════════════════════════════════════════════════ */
+
+interface ParsedAuthor {
+  name: string;
+  markers: string[];
+}
+
+interface ParsedAuthorMetadata {
+  authors: ParsedAuthor[];
+  affiliations: string[];
+  emails: string[];
+  urls: string[];
+  notes: string[];
+  unclassified: string[];
+  zhAffiliations: string[];
+  zhNotes: string[];
+}
+
+const AFFILIATION_REGEX = /\b(university|college|institute|institution|department|dept\.?|laboratory|laboratories|labs?|school|center|centre|academy|faculty|corporation|inc\.?|corp\.?|llc|ltd\.?|technologies|hospital|research|google|microsoft|meta|apple|amazon|openai|deepmind|baidu|tencent|alibaba|huawei|bytedance|tsinghua|peking|stanford|mit|berkeley|cmu|harvard|oxford|cambridge|toronto|carnegie|division|telecom)\b/i;
+const NOTE_REGEX = /\b(equal contribution|correspondence|corresponding author|work performed|listing order|all authors contributed|supported by|grant|project funded|technical report)\b/i;
+const EMAIL_REGEX = /(?:\{[^}]+\}|[a-zA-Z0-9._%+-]+)@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+const URL_REGEX = /https?:\/\/[^\s)]+/g;
+
+function parseAuthorCandidateBlocks(blocks: BlockData[], allBlocks?: BlockData[]): ParsedAuthorMetadata {
+  const authors: ParsedAuthor[] = [];
+  const affiliations: string[] = [];
+  const emails: string[] = [];
+  const urls: string[] = [];
+  const notes: string[] = [];
+  const unclassified: string[] = [];
+  const zhAffiliations: string[] = [];
+  const zhNotes: string[] = [];
+
+  const seenEmails = new Set<string>();
+  const seenAffiliations = new Set<string>();
+  const seenAuthors = new Set<string>();
+  const seenUrls = new Set<string>();
+
+  // 0. Extract repository links and footnotes from page 1
+  if (allBlocks) {
+    const p1Blocks = allBlocks.filter(b => b.page === 1);
+    for (const b of p1Blocks) {
+      const fixed = (b.en || '').replace(/(https?:\/\/[a-zA-Z0-9_.-]+)\s*\.\s*([a-zA-Z]{2,}[^\s)]*)/g, '$1.$2');
+      const mUrls = fixed.match(URL_REGEX);
+      if (mUrls) {
+        mUrls.forEach(u => {
+          const cleanU = u.replace(/[.,;)]+$/, '');
+          if (!seenUrls.has(cleanU) && /(?:github\.com|huggingface\.co|arxiv\.org|gitlab\.com|https?:\/\/)/i.test(cleanU)) {
+            seenUrls.add(cleanU);
+            urls.push(cleanU);
+          }
+        });
+      }
+      const enTrim = (b.en || '').trim();
+      if (NOTE_REGEX.test(enTrim) && enTrim.length < 200 && !notes.includes(enTrim)) {
+        notes.push(enTrim);
+        if (b.zh && b.zh !== b.en && !b.zh.startsWith('[ERROR') && !zhNotes.includes(b.zh)) {
+          zhNotes.push(b.zh);
+        }
+      }
+    }
+  }
+
+  function addAuthor(item: string) {
+    let name = item.trim();
+    if (!name) return;
+    const markers: string[] = [];
+
+    function repMath(content: string) {
+      const tokens = content.match(/[0-9]+|\*|†|‡|§|\\dagger|\\ddagger/g);
+      if (tokens) {
+        tokens.forEach(t => {
+          let cleanT = t.replace(/\\/g, '').trim();
+          if (cleanT === 'dagger') cleanT = '†';
+          else if (cleanT === 'ddagger') cleanT = '‡';
+          if (cleanT) markers.push(cleanT);
+        });
+      }
+      return '';
+    }
+
+    name = name
+      .replace(/\$\^?\{([^}]+)\}\$/g, (_, c) => repMath(c))
+      .replace(/\$([0-9a-zA-Z*†‡§,\s\\]+)\$/g, (_, c) => repMath(c))
+      .replace(/[\s,]*([*†‡§0-9]+|\([0-9*†‡§,]+\)|\[[0-9*†‡§,]+\])[\s,]*$/g, (_, p1) => {
+        const found = p1.match(/[*†‡§0-9]+/g);
+        if (found) found.forEach((x: string) => markers.push(x));
+        return '';
+      })
+      .replace(/[*†‡§]+$/g, (m) => {
+        markers.push(m);
+        return '';
+      }).trim();
+
+    if (name && name.length >= 2 && name.length <= 50 && /[a-zA-Z\u00C0-\u024F\u4e00-\u9fa5]/.test(name)) {
+      const key = name.toLowerCase();
+      if (!seenAuthors.has(key)) {
+        seenAuthors.add(key);
+        authors.push({ name, markers: [...new Set(markers)] });
+      }
+    } else if (item.length > 0 && !/^[\s*†‡§0-9]+$/.test(item)) {
+      unclassified.push(item);
+    }
+  }
+
+  function addAffiliation(aff: string, zh?: string) {
+    const clean = aff.replace(/^[0-9*†‡§,\s]+|[,\s]+$/g, '').trim();
+    if (clean && !seenAffiliations.has(clean.toLowerCase())) {
+      seenAffiliations.add(clean.toLowerCase());
+      affiliations.push(clean);
+      if (zh && zh !== aff && !zh.startsWith('[ERROR')) {
+        const cleanZh = zh.replace(/^[0-9*†‡§,\s]+|[,\s]+$/g, '').trim();
+        if (cleanZh && !zhAffiliations.includes(cleanZh)) {
+          zhAffiliations.push(cleanZh);
+        }
+      }
+    }
+  }
+
+  for (const b of blocks) {
+    let rawText = b.en || '';
+    if (b.type === 'table') {
+      rawText = rawText.replace(/<\/td>/gi, '\n').replace(/<\/tr>/gi, '\n').replace(/<[^>]+>/g, ' ');
+    }
+    // Fix broken OCR spaces in URLs like github. com
+    rawText = rawText.replace(/(https?:\/\/[a-zA-Z0-9_.-]+)\s*\.\s*([a-zA-Z]{2,}[^\s)]*)/g, '$1.$2');
+    const lines = rawText.split(/[\r\n]+/).map(s => s.trim()).filter(Boolean);
+
+    for (let line of lines) {
+      // 1. Extract URLs
+      const matchedUrls = line.match(URL_REGEX);
+      if (matchedUrls) {
+        matchedUrls.forEach(u => {
+          const cleanU = u.replace(/[.,;)]+$/, '');
+          if (!seenUrls.has(cleanU)) {
+            seenUrls.add(cleanU);
+            urls.push(cleanU);
+          }
+        });
+        line = line.replace(URL_REGEX, '').trim();
+      }
+
+      // 2. Extract emails
+      const matchedEmails = line.match(EMAIL_REGEX);
+      if (matchedEmails) {
+        matchedEmails.forEach(em => {
+          const cleanEmail = em.replace(/\s+/g, '');
+          if (!seenEmails.has(cleanEmail)) {
+            seenEmails.add(cleanEmail);
+            emails.push(cleanEmail);
+          }
+        });
+        line = line.replace(EMAIL_REGEX, '').trim();
+      }
+
+      if (!line) continue;
+
+      // 3. Notes / footnotes
+      if (NOTE_REGEX.test(line) || ((line.startsWith('*') || line.startsWith('†')) && line.length > 25)) {
+        if (!notes.includes(line)) {
+          notes.push(line);
+          if (b.zh && b.zh !== b.en && !b.zh.startsWith('[ERROR') && !zhNotes.includes(b.zh)) {
+            zhNotes.push(b.zh);
+          }
+        }
+        continue;
+      }
+
+      // 4. Check if line is pure affiliation or contains multiple universities/institutions
+      const hasAffil = AFFILIATION_REGEX.test(line);
+      const isPureAffil =
+        /^\s*(?:\$\^?\{[0-9*†‡,]+\}\$|\^[0-9*†‡,]+|[0-9*†‡§]+\s+)/.test(line) && hasAffil;
+
+      if (isPureAffil || (hasAffil && (line.match(AFFILIATION_REGEX) || []).length >= 2)) {
+        const parts = line.split(/(?:\$\^?\{[0-9*†‡,]+\}\$|\^[0-9*†‡,]+|[;]+|\s{2,})/);
+        for (const part of parts) {
+          const p = part.replace(/^[0-9*†‡§,\s]+|[,\s]+$/g, '').trim();
+          if (p && p.length > 3 && !seenAffiliations.has(p.toLowerCase()) && AFFILIATION_REGEX.test(p)) {
+            addAffiliation(p, b.zh);
+          }
+        }
+        continue;
+      }
+
+      if (hasAffil) {
+        const affMatch = line.match(AFFILIATION_REGEX);
+        if (affMatch && affMatch.index !== undefined && affMatch.index > 3 && !line.slice(0, affMatch.index).includes(',')) {
+          const potentialAuthor = line.slice(0, affMatch.index).trim();
+          const potentialAff = line.slice(affMatch.index).trim();
+          addAuthor(potentialAuthor);
+          addAffiliation(potentialAff, b.zh);
+          continue;
+        } else {
+          addAffiliation(line, b.zh);
+          continue;
+        }
+      }
+
+      // 5. Split authors by comma (not inside braces)
+      const parts = line.split(/,\s*(?![^{}]*\})|\s+and\s+/);
+      for (const part of parts) {
+        addAuthor(part);
+      }
+    }
+  }
+
+  return { authors, affiliations, emails, urls, notes, unclassified, zhAffiliations, zhNotes };
+}
+
+const AuthorMetadataCard = memo(({
+  blocks,
+  allBlocks,
+}: {
+  blocks: BlockData[];
+  allBlocks?: BlockData[];
+}) => {
+  const [showRaw, setShowRaw] = useState(false);
+  const metadata = useMemo(() => parseAuthorCandidateBlocks(blocks, allBlocks), [blocks, allBlocks]);
+
+  return (
+    <div className="liquid-glass-card mx-2 my-3 p-5 sm:p-6 rounded-2xl border border-white/60 shadow-sm text-center relative overflow-hidden transition-all duration-300">
+      {/* Top Header Tag */}
+      <div className="flex items-center justify-between mb-3.5 px-1">
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium tracking-wide text-violet-700 bg-violet-50/90 border border-violet-100/80 select-none">
+          <span className="w-1.5 h-1.5 rounded-full bg-violet-500" />
+          Authors & Affiliations
+        </span>
+        <button
+          type="button"
+          onClick={() => setShowRaw(!showRaw)}
+          className="text-[11px] text-gray-400 hover:text-violet-600 transition-colors select-none font-medium px-2 py-0.5 rounded hover:bg-white/60"
+        >
+          {showRaw ? '精简视图' : '查看原始行'}
+        </button>
+      </div>
+
+      {showRaw ? (
+        <div className="text-left space-y-1.5 py-1 px-2 font-mono text-xs text-gray-600 bg-gray-50/60 rounded-xl p-3 border border-gray-100">
+          {blocks.map((b, i) => (
+            <div key={i} className="leading-relaxed border-b border-gray-100/60 last:border-b-0 pb-1">
+              <span className="text-[10px] text-violet-500 font-semibold mr-2">[{b.idx}]</span>
+              <span>{b.en}</span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <>
+          {/* Authors List */}
+          {metadata.authors.length > 0 && (
+            <div className="flex flex-wrap items-center justify-center gap-x-3.5 gap-y-1.5 text-center">
+              {metadata.authors.map((author, i) => (
+                <span
+                  key={i}
+                  className="inline-flex items-center text-[15px] sm:text-base font-medium text-gray-800 hover:text-violet-700 transition-colors cursor-default"
+                >
+                  <span>{author.name}</span>
+                  {author.markers.length > 0 && (
+                    <sup className="text-violet-600 font-semibold text-[10px] ml-0.5 tracking-tighter select-none">
+                      {author.markers.join(' ')}
+                    </sup>
+                  )}
+                  {i < metadata.authors.length - 1 && (
+                    <span className="text-gray-300 ml-3.5 select-none font-light">•</span>
+                  )}
+                </span>
+              ))}
+            </div>
+          )}
+
+          {/* Affiliations */}
+          {metadata.affiliations.length > 0 && (
+            <div className="flex flex-wrap items-center justify-center gap-x-3.5 gap-y-1 mt-3 text-xs sm:text-[13px] text-gray-500 text-center leading-relaxed">
+              {metadata.affiliations.map((aff, i) => (
+                <span key={i} className="inline-flex items-center">
+                  <span>{aff}</span>
+                  {i < metadata.affiliations.length - 1 && (
+                    <span className="text-gray-300 ml-3.5 select-none">•</span>
+                  )}
+                </span>
+              ))}
+            </div>
+          )}
+
+          {/* Translated Affiliations (if any) */}
+          {metadata.zhAffiliations.length > 0 && (
+            <div className="flex flex-wrap items-center justify-center gap-x-3.5 gap-y-1 mt-1 text-xs text-gray-400 text-center leading-relaxed">
+              {metadata.zhAffiliations.map((aff, i) => (
+                <span key={i} className="inline-flex items-center">
+                  <span>{aff}</span>
+                  {i < metadata.zhAffiliations.length - 1 && (
+                    <span className="text-gray-300 ml-3.5 select-none">•</span>
+                  )}
+                </span>
+              ))}
+            </div>
+          )}
+
+          {/* URLs & Repository links */}
+          {metadata.urls.length > 0 && (
+            <div className="flex flex-wrap items-center justify-center gap-2 mt-3 pt-2">
+              {metadata.urls.map((url, i) => (
+                <a
+                  key={i}
+                  href={url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="font-mono text-[11px] text-violet-600 hover:text-violet-800 bg-violet-50/70 hover:bg-violet-100/70 px-2.5 py-0.5 rounded-full border border-violet-100 transition-all flex items-center gap-1"
+                >
+                  <span className="underline">{url.replace(/^https?:\/\//, '')}</span>
+                </a>
+              ))}
+            </div>
+          )}
+
+          {/* Emails */}
+          {metadata.emails.length > 0 && (
+            <div className="flex flex-wrap items-center justify-center gap-1.5 mt-3.5 pt-3 border-t border-gray-100/80">
+              {metadata.emails.map((email, i) => (
+                <a
+                  key={i}
+                  href={`mailto:${email.replace(/^\{[^}]+\}/, '')}`}
+                  title={`Send email to ${email}`}
+                  className="font-mono text-[11px] text-gray-500 hover:text-violet-600 bg-white/70 hover:bg-violet-50/80 px-2.5 py-0.5 rounded-full border border-gray-100/90 transition-all select-all shadow-2xs"
+                >
+                  {email}
+                </a>
+              ))}
+            </div>
+          )}
+
+          {/* Footnotes / Notes */}
+          {(metadata.notes.length > 0 || metadata.zhNotes.length > 0) && (
+            <div className="mt-3.5 pt-2.5 text-[11px] text-gray-400 italic text-center space-y-0.5 border-t border-gray-100/60 leading-relaxed">
+              {metadata.notes.map((note, i) => (
+                <div key={i}>{note}</div>
+              ))}
+              {metadata.zhNotes.map((note, i) => (
+                <div key={`zh-${i}`} className="text-gray-500">{note}</div>
+              ))}
+            </div>
+          )}
+
+          {/* Unclassified Fallback if no authors recognized */}
+          {metadata.authors.length === 0 && metadata.unclassified.length > 0 && (
+            <div className="space-y-1 text-sm text-gray-600 py-1">
+              {metadata.unclassified.map((line, i) => (
+                <div key={i}>{line}</div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+});
+
+type RenderItem =
+  | { kind: 'block'; block: BlockData; origIdx: number; animIdx: number; pageBreak: boolean }
+  | { kind: 'author_group'; blocks: BlockData[]; allBlocks?: BlockData[]; animIdx: number; pageBreak: boolean }
+  | {
+      kind: 'code_group';
+      blocks: BlockData[];
+      code: string;
+      caption?: string;
+      captionZh?: string;
+      page: number;
+      idx: number;
+      animIdx: number;
+      pageBreak: boolean;
+    };
+
+function groupBlocksForRendering(blocks: BlockData[]): RenderItem[] {
+  const items: RenderItem[] = [];
   let lastPage = 0;
+
+  // Find page 1 primary title
+  const firstTitleIdx = blocks.findIndex(b => b.page === 1 && b.type === 'title');
+
+  // Find range of consecutive titles on page 1 (e.g. main title + subtitle)
+  let lastTitleIdx = -1;
+  if (firstTitleIdx !== -1) {
+    lastTitleIdx = firstTitleIdx;
+    while (
+      lastTitleIdx + 1 < blocks.length &&
+      blocks[lastTitleIdx + 1].page === 1 &&
+      blocks[lastTitleIdx + 1].type === 'title'
+    ) {
+      const nextEn = (blocks[lastTitleIdx + 1].en || '').trim().toLowerCase();
+      if (nextEn.startsWith('abstract') || nextEn.startsWith('摘要')) break;
+      lastTitleIdx++;
+    }
+  }
+
+  // Check candidate author blocks between lastTitleIdx and abstract/section start
+  let authorEndIdx = -1;
+  const candidateBlocks: BlockData[] = [];
+
+  if (lastTitleIdx !== -1) {
+    for (let i = lastTitleIdx + 1; i < blocks.length; i++) {
+      const b = blocks[i];
+      if (b.page !== 1) break;
+
+      const enLower = (b.en || '').trim().toLowerCase();
+
+      // Check if table is actually an author grid (contains @ or affiliation)
+      const isTableAuthorGrid =
+        b.type === 'table' && (EMAIL_REGEX.test(b.en || '') || AFFILIATION_REGEX.test(b.en || ''));
+
+      if (isTableAuthorGrid) {
+        candidateBlocks.push(b);
+        continue;
+      }
+
+      const isAuthorOrAffil =
+        (b.en || '').split(',').length >= 3 ||
+        /\$\^?\{?[*†‡0-9a-z,\s]+\}?\s*\$/i.test(b.en || '') ||
+        AFFILIATION_REGEX.test(b.en || '') ||
+        EMAIL_REGEX.test(b.en || '') ||
+        NOTE_REGEX.test(enLower) ||
+        /\b(?:correspondence|equal contribution|university|institute|laboratory|department|school)\b/i.test(enLower);
+
+      const isStop =
+        b.type === 'header' ||
+        (b.type === 'title' && !enLower.startsWith('author')) ||
+        enLower.startsWith('abstract') ||
+        enLower.startsWith('摘要') ||
+        /^(?:(?:\d+\.?|[I|V|X]+\.?)\s+)?(?:introduction|overview)/i.test(enLower) ||
+        ['equation', 'table', 'image', 'chart', 'figure'].includes(b.type) ||
+        (!isAuthorOrAffil && (b.en || '').length > 280);
+
+      if (isStop) {
+        authorEndIdx = i;
+        break;
+      }
+
+      // Skip arXiv header aside_text
+      if (b.type === 'aside_text' && enLower.includes('arxiv')) {
+        continue;
+      }
+
+      candidateBlocks.push(b);
+    }
+  }
+
+  const shouldGroupAuthors =
+    candidateBlocks.length > 0 &&
+    (candidateBlocks.length >= 2 ||
+      EMAIL_REGEX.test(candidateBlocks[0].en || '') ||
+      AFFILIATION_REGEX.test(candidateBlocks[0].en || '') ||
+      (candidateBlocks[0].en || '').includes('*') ||
+      (candidateBlocks[0].en || '').includes('$'));
+
+  let animCounter = 0;
+  for (let i = 0; i < blocks.length; i++) {
+    const b = blocks[i];
+    const pageBreak = b.page !== lastPage;
+    lastPage = b.page;
+
+    if (shouldGroupAuthors && i === lastTitleIdx + 1) {
+      items.push({
+        kind: 'author_group',
+        blocks: candidateBlocks,
+        allBlocks: blocks,
+        animIdx: animCounter++,
+        pageBreak: false,
+      });
+      i = (authorEndIdx !== -1 ? authorEndIdx : lastTitleIdx + candidateBlocks.length) - 1;
+      continue;
+    }
+
+    // Check for code / pseudocode / algorithm sequence or preceding caption
+    const isCap = isCodeCaption(b.en);
+    const nextIsCode =
+      i + 1 < blocks.length &&
+      blocks[i + 1].page === b.page &&
+      (isCodeBlock(blocks[i + 1].en) || blocks[i + 1].type === 'algorithm');
+    const isCode = isCodeBlock(b.en) || b.type === 'algorithm';
+
+    if (isCode || (isCap && nextIsCode)) {
+      let j = i;
+      const cluster: BlockData[] = [];
+
+      while (j < blocks.length && blocks[j].page === b.page) {
+        const cur = blocks[j];
+        const curIsCode = isCodeBlock(cur.en) || cur.type === 'algorithm';
+        const curIsCap = isCodeCaption(cur.en);
+        const hasCodeOrCapAhead = blocks
+          .slice(j + 1)
+          .some(x => x.page === b.page && (isCodeBlock(x.en) || x.type === 'algorithm' || isCodeCaption(x.en)));
+        const curIsComment = !isSectionHeading(cur.en) && cur.en.length < 100 && hasCodeOrCapAhead;
+
+        if (curIsCode || curIsCap || curIsComment) {
+          cluster.push(cur);
+          j++;
+        } else {
+          break;
+        }
+      }
+
+      const codeAndComments = cluster.filter(cb => !isCodeCaption(cb.en));
+      const captionBlocks = cluster.filter(cb => isCodeCaption(cb.en));
+
+      if (codeAndComments.length > 0) {
+        const snippets: BlockData[][] = [];
+        let curSnippet: BlockData[] = [];
+
+        for (const item of codeAndComments) {
+          if (curSnippet.length > 0 && isCodeStart(item.en)) {
+            snippets.push(curSnippet);
+            curSnippet = [item];
+          } else {
+            curSnippet.push(item);
+          }
+        }
+        if (curSnippet.length > 0) snippets.push(curSnippet);
+
+        snippets.forEach((sn, snIdx) => {
+          const fullCode = sn
+            .map(item => {
+              if (!isCodeBlock(item.en) && item.type !== 'algorithm' && !item.en.trim().startsWith('#')) {
+                return '# ' + item.en.trim();
+              }
+              return item.en;
+            })
+            .join('\n');
+
+          const matchedCap = matchCodeCaption(fullCode, captionBlocks, snIdx);
+
+          items.push({
+            kind: 'code_group',
+            blocks: sn,
+            code: fullCode,
+            caption: matchedCap?.en,
+            captionZh: matchedCap?.zh,
+            page: sn[0].page,
+            idx: sn[0].idx,
+            animIdx: animCounter++,
+            pageBreak: sn[0].page !== lastPage,
+          });
+          lastPage = sn[0].page;
+        });
+
+        i = j - 1;
+        continue;
+      }
+    }
+
+    items.push({
+      kind: 'block',
+      block: b,
+      origIdx: i,
+      animIdx: animCounter++,
+      pageBreak,
+    });
+  }
+
+  return items;
+}
+
+const Preview = memo(function Preview({
+  blocks,
+  taskId,
+  phase,
+  refIndex,
+  onJumpToReference,
+  tldr,
+  isTLDRLoading,
+  onOpenVariableInspector,
+}: {
+  blocks: BlockData[];
+  taskId: string;
+  phase?: string;
+  refIndex: Record<string, ReferenceItem>;
+  onJumpToReference: (id: string, page?: number) => void;
+  tldr?: PaperTLDR | null;
+  isTLDRLoading?: boolean;
+  onOpenVariableInspector?: () => void;
+}) {
+  const renderItems = useMemo(() => groupBlocksForRendering(blocks), [blocks]);
+  const hasAuthorGroup = useMemo(() => renderItems.some(it => it.kind === 'author_group'), [renderItems]);
 
   if (blocks.length === 0) {
     return (
@@ -1004,24 +1739,85 @@ function Preview({ blocks, taskId, phase }: { blocks: BlockData[]; taskId: strin
 
   return (
     <div className="space-y-1">
-      {blocks.map((b, animIdx) => {
-        const pageBreak = b.page !== lastPage;
-        lastPage = b.page;
-        return (
-          <div key={`${b.page}-${b.idx}`} className="animate-slide-in" style={{ animationDelay: `${Math.min(animIdx * 0.03, 0.5)}s` }}>
-            {pageBreak && (
-              <div data-page={b.page} className="flex items-center gap-3 mt-8 mb-4 scroll-mt-36">
-                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/60 backdrop-blur-sm border border-white/40 shadow-sm">
-                  <IconPage /><span className="text-sm font-semibold text-violet-600">第 {b.page} 页</span>
-                </div>
-                <div className="flex-1 h-px bg-gradient-to-r from-violet-200/60 via-violet-100/30 to-transparent" />
+      {renderItems.map((item, index) => {
+        if (item.kind === 'author_group') {
+          return (
+            <React.Fragment key="page-1-author-and-tldr">
+              <div
+                className={`animate-slide-in ${index > 5 ? 'deferred-block' : ''}`}
+                style={{ animationDelay: `${Math.min(item.animIdx * 0.03, 0.5)}s` }}
+              >
+                <AuthorMetadataCard blocks={item.blocks} allBlocks={item.allBlocks} />
               </div>
+              <PaperTLDRCard tldr={tldr || undefined} loading={isTLDRLoading} />
+            </React.Fragment>
+          );
+        }
+
+        if (item.kind === 'code_group') {
+          return (
+            <div
+              key={`code-group-p${item.page}-i${item.idx}`}
+              className={`animate-slide-in ${index > 5 ? 'deferred-block' : ''}`}
+              style={{ animationDelay: `${Math.min(item.animIdx * 0.03, 0.5)}s` }}
+            >
+              {item.pageBreak && (
+                <div data-page={item.page} className="flex items-center gap-3 mt-8 mb-4 scroll-mt-36">
+                  <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/60 backdrop-blur-sm border border-white/40 shadow-sm">
+                    <IconPage /><span className="text-sm font-semibold text-violet-600">第 {item.page} 页</span>
+                  </div>
+                  <div className="flex-1 h-px bg-gradient-to-r from-violet-200/60 via-violet-100/30 to-transparent" />
+                </div>
+              )}
+              <CodeCard
+                code={item.code}
+                caption={item.caption}
+                captionZh={item.captionZh}
+                page={item.page}
+                idx={item.idx}
+              />
+            </div>
+          );
+        }
+
+        const b = item.block;
+        const isFirstPageTitle = b.page === 1 && b.type === 'title';
+        const nextItem = index < renderItems.length - 1 ? renderItems[index + 1] : null;
+        const showTLDRAfterTitle = !hasAuthorGroup && isFirstPageTitle && (
+          !nextItem || nextItem.kind !== 'block' || nextItem.block.type !== 'title'
+        );
+
+        return (
+          <React.Fragment key={`${b.page}-${b.idx}`}>
+            <div
+              className={`animate-slide-in ${index > 5 ? 'deferred-block' : ''}`}
+              style={{ animationDelay: `${Math.min(item.animIdx * 0.03, 0.5)}s` }}
+            >
+              {item.pageBreak && (
+                <div data-page={b.page} className="flex items-center gap-3 mt-8 mb-4 scroll-mt-36">
+                  <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/60 backdrop-blur-sm border border-white/40 shadow-sm">
+                    <IconPage /><span className="text-sm font-semibold text-violet-600">第 {b.page} 页</span>
+                  </div>
+                  <div className="flex-1 h-px bg-gradient-to-r from-violet-200/60 via-violet-100/30 to-transparent" />
+                </div>
+              )}
+              <BlockItem
+                b={b}
+                taskId={taskId}
+                refIndex={refIndex}
+                onJumpToReference={onJumpToReference}
+                onOpenVariableInspector={onOpenVariableInspector}
+                prevBlock={item.origIdx > 0 ? blocks[item.origIdx - 1] : undefined}
+                nextBlock={item.origIdx < blocks.length - 1 ? blocks[item.origIdx + 1] : undefined}
+              />
+            </div>
+            {showTLDRAfterTitle && (
+              <PaperTLDRCard tldr={tldr || undefined} loading={isTLDRLoading} />
             )}
-            <BlockItem b={b} taskId={taskId} />
-          </div>
+          </React.Fragment>
         );
       })}
     </div>
   );
-}
+});
 
